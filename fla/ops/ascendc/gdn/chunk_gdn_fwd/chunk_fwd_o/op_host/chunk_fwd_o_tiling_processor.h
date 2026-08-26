@@ -22,6 +22,8 @@
 #include "tiling_base/data_copy_transpose_tiling.h"
 #include "tiling_base/tiling_templates_registry.h"
 #include "../op_kernel/chunk_fwd_o_struct.h"
+#include "../op_kernel/arch35/chunk_fwd_o_common.h"
+#include "tiling/platform/platform_ascendc.h"
 
 using GDN::ChunkFwdOTilingData;
 
@@ -37,6 +39,11 @@ static constexpr size_t CHUNK_FWD_O_INPUT_CHUNK_OFFSETS_IDX = 6;
 
 static constexpr size_t CHUNK_FWD_O_ATTR_SCALE_IDX = 0;
 static constexpr size_t CHUNK_FWD_O_ATTR_CHUNK_SIZE_IDX = 1;
+static constexpr size_t CHUNK_FWD_O_ATTR_USE_EXP2_IDX = 2;
+
+static constexpr int64_t CHUNK_FWD_O_A5_BT = GDN::CHUNK_FWD_O_A5_BT;
+static constexpr int64_t CHUNK_FWD_O_A5_K = GDN::CHUNK_FWD_O_A5_K;
+static constexpr int64_t CHUNK_FWD_O_A5_V = GDN::CHUNK_FWD_O_A5_V;
 
 static constexpr size_t CHUNK_FWD_O_QKV_DIM_NUM = 4;
 static constexpr size_t CHUNK_FWD_O_H_DIM_NUM = 5;
@@ -83,6 +90,8 @@ struct ChunkFwdOTilingContext {
     int64_t chunkSize;
     int64_t dataType;
     int64_t gDataType;
+    bool useExp2;
+    NpuArch npuArch;
     uint32_t aicCoreNum;
     size_t sysWorkspaceSize;
 };
@@ -249,6 +258,28 @@ public:
         return ge::GRAPH_SUCCESS;
     }
 
+    ge::graphStatus A5ShapeCheck()
+    {
+        OP_CHECK_IF(tiling_.chunkSize != CHUNK_FWD_O_A5_BT,
+                    OP_LOGE(ctx_.nodeName,
+                            "A5 chunk_fwd_o requires chunk_size=%ld, but got %ld.",
+                            CHUNK_FWD_O_A5_BT, tiling_.chunkSize),
+                    return ge::GRAPH_FAILED);
+        OP_CHECK_IF(tiling_.kHeadDim != CHUNK_FWD_O_A5_K || tiling_.vHeadDim != CHUNK_FWD_O_A5_V,
+                    OP_LOGE(ctx_.nodeName,
+                            "A5 chunk_fwd_o requires K=V=%ld, but got K=%ld V=%ld.",
+                            CHUNK_FWD_O_A5_K, tiling_.kHeadDim, tiling_.vHeadDim),
+                    return ge::GRAPH_FAILED);
+        return ge::GRAPH_SUCCESS;
+    }
+
+    ge::graphStatus WorkspaceTilingA5()
+    {
+        // A5 L1<->UB path: CrossCore uses hardware flag IDs only; no user GM sync region.
+        workspaceSize_ = ctx_.sysWorkspaceSize;
+        return ge::GRAPH_SUCCESS;
+    }
+
     ge::graphStatus WorkspaceTiling()
     {
         size_t workspaceOffset = ctx_.sysWorkspaceSize;
@@ -283,6 +314,12 @@ public:
         OP_CHECK_IF(PreCheck() != ge::GRAPH_SUCCESS, , return ge::GRAPH_FAILED);
         OP_CHECK_IF(ShapeCheck() != ge::GRAPH_SUCCESS, , return ge::GRAPH_FAILED);
         OP_CHECK_IF(CommonTiling() != ge::GRAPH_SUCCESS, , return ge::GRAPH_FAILED);
+        tiling_.useExp2 = ctx_.useExp2 ? 1 : 0;
+        if (ctx_.npuArch == NpuArch::DAV_3510) {
+            OP_CHECK_IF(A5ShapeCheck() != ge::GRAPH_SUCCESS, , return ge::GRAPH_FAILED);
+            OP_CHECK_IF(WorkspaceTilingA5() != ge::GRAPH_SUCCESS, , return ge::GRAPH_FAILED);
+            return ge::GRAPH_SUCCESS;
+        }
         OP_CHECK_IF(WorkspaceTiling() != ge::GRAPH_SUCCESS, , return ge::GRAPH_FAILED);
         return ge::GRAPH_SUCCESS;
     }

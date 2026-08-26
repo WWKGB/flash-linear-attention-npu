@@ -144,7 +144,9 @@ aclnnStatus aclnnChunkFwdOGetWorkspaceSize(
     CHECK_RET(ret == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
     CHECK_COND(ParamsDataContiguous(params, executorPtr) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID,
                "ParamsDataContiguous failed.");
-    auto result = l0op::ChunkFwdO(params.q, params.k, params.v, params.h, params.g, params.cuSeqlensOptional, params.chunkOffsetsOptional, params.scale, params.chunkSize, params.oOut, executorPtr);
+    auto result = l0op::ChunkFwdO(params.q, params.k, params.v, params.h, params.g, params.cuSeqlensOptional,
+                                params.chunkOffsetsOptional, params.scale, params.chunkSize, true, params.oOut,
+                                executorPtr);
     CHECK_RET(result[0] != nullptr, ACLNN_ERR_PARAM_NULLPTR);
 
     // If the output tensor is non-contiguous, convert the calculated contiguous tensor to non-contiguous.
