@@ -23,21 +23,21 @@ __simd_vf__ inline void InitCausalMask(__ubuf__ uint8_t *maskAddr, int64_t seqle
 }
 
 // P2 · Stage1 gate precompute.
-__simd_vf__ inline void Stage1Gate(__ubuf__ float *gateOAddr, __ubuf__ float *gateAAddr,
-                                   __ubuf__ float *gAddr, int64_t chunkLen, bool useExp2)
+template <bool UseExp2>
+__simd_vf__ inline void Stage1Gate(__ubuf__ float *gateOAddr, __ubuf__ float *gateAAddr, __ubuf__ float *gAddr,
+                                   int64_t chunkLen)
 {
     (void)gateOAddr;
     (void)gateAAddr;
     (void)gAddr;
     (void)chunkLen;
-    (void)useExp2;
+    (void)UseExp2;
 }
 
 // P4 · Stage3 gate application + causal mask; A' -> L1, O_s' -> UB.
 __simd_vf__ inline void Stage3GateMask(__ubuf__ float *aRawAddr, __ubuf__ float *oSRawAddr,
                                        __ubuf__ float *gateOAddr, __ubuf__ float *gateAAddr,
-                                       __ubuf__ uint8_t *maskAddr, __ubuf__ float *oSPrimeAddr,
-                                       int64_t chunkLen)
+                                       __ubuf__ uint8_t *maskAddr, __ubuf__ float *oSPrimeAddr, int64_t chunkLen)
 {
     (void)aRawAddr;
     (void)oSRawAddr;
@@ -49,9 +49,8 @@ __simd_vf__ inline void Stage3GateMask(__ubuf__ float *aRawAddr, __ubuf__ float 
 }
 
 // P6 · Stage5 fuse and write back.
-template <typename OutputT>
-__simd_vf__ inline void Stage5Fuse(__ubuf__ float *oSPrimeAddr, __ubuf__ float *oLAddr, __ubuf__ OutputT *oOutAddr,
-                                 float scale, int64_t chunkLen)
+__simd_vf__ inline void Stage5Fuse(__ubuf__ float *oSPrimeAddr, __ubuf__ float *oLAddr, __ubuf__ bfloat16_t *oOutAddr,
+                                   float scale, int64_t chunkLen)
 {
     (void)oSPrimeAddr;
     (void)oLAddr;
@@ -60,12 +59,11 @@ __simd_vf__ inline void Stage5Fuse(__ubuf__ float *oSPrimeAddr, __ubuf__ float *
     (void)chunkLen;
 }
 
-template <typename InputT, typename GT>
+template <typename GT, bool UseExp2>
 class ChunkFwdOA5VectorProcess {
 public:
     __aicore__ inline ChunkFwdOA5VectorProcess(GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR h, GM_ADDR g,
-                                               GM_ADDR cuSeqlens, GM_ADDR chunkOffsets, GM_ADDR o,
-                                               GM_ADDR workspace)
+                                               GM_ADDR cuSeqlens, GM_ADDR chunkOffsets, GM_ADDR o, GM_ADDR workspace)
         : q_(q), k_(k), v_(v), h_(h), g_(g), cuSeqlens_(cuSeqlens), chunkOffsets_(chunkOffsets), o_(o),
           workspace_(workspace)
     {
@@ -74,7 +72,7 @@ public:
     __aicore__ inline void Init(const ChunkFwdOTilingData &tiling, TPipe *pipe)
     {
         (void)pipe;
-        tiling_ = &tiling;
+        tiling_ = tiling;
     }
 
     __aicore__ inline void ProcessInit()
@@ -82,21 +80,30 @@ public:
         // P1 placeholder: materialize m_A into UB fixed region.
     }
 
-    __aicore__ inline void ProcessStage1(int64_t chunkIdx)
+    __aicore__ inline void ProcessStage1(uint32_t loopIdx, const ChunkFwdOChunkLoc &loc, int64_t hk, int64_t hv)
     {
-        (void)chunkIdx;
+        (void)loopIdx;
+        (void)loc;
+        (void)hk;
+        (void)hv;
         // P2 placeholder.
     }
 
-    __aicore__ inline void ProcessStage3(int64_t chunkIdx)
+    __aicore__ inline void ProcessStage3(uint32_t loopIdx, const ChunkFwdOChunkLoc &loc, int64_t hk, int64_t hv)
     {
-        (void)chunkIdx;
+        (void)loopIdx;
+        (void)loc;
+        (void)hk;
+        (void)hv;
         // P4 placeholder.
     }
 
-    __aicore__ inline void ProcessStage5(int64_t chunkIdx)
+    __aicore__ inline void ProcessStage5(uint32_t loopIdx, const ChunkFwdOChunkLoc &loc, int64_t hk, int64_t hv)
     {
-        (void)chunkIdx;
+        (void)loopIdx;
+        (void)loc;
+        (void)hk;
+        (void)hv;
         // P6 placeholder.
     }
 
@@ -110,7 +117,7 @@ private:
     GM_ADDR chunkOffsets_;
     GM_ADDR o_;
     GM_ADDR workspace_;
-    const ChunkFwdOTilingData *tiling_ = nullptr;
+    ChunkFwdOTilingData tiling_{};
 };
 
 } // namespace GDN

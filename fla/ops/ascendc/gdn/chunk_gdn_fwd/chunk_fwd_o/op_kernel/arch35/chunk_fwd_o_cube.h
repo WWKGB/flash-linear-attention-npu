@@ -14,7 +14,7 @@ namespace GDN {
 
 using namespace AscendC;
 
-template <typename InputT, typename GT>
+template <typename GT>
 class ChunkFwdOA5CubeProcess {
 public:
     __aicore__ inline ChunkFwdOA5CubeProcess(GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR h, GM_ADDR g,
@@ -27,18 +27,24 @@ public:
 
     __aicore__ inline void Init(const ChunkFwdOTilingData &tiling)
     {
-        tiling_ = &tiling;
+        tiling_ = tiling;
     }
 
-    __aicore__ inline void ProcessStage2(int64_t chunkIdx)
+    __aicore__ inline void ProcessStage2(uint32_t loopIdx, const ChunkFwdOChunkLoc &loc, int64_t hk, int64_t hv)
     {
-        (void)chunkIdx;
+        (void)loopIdx;
+        (void)loc;
+        (void)hk;
+        (void)hv;
         // P3 placeholder: C1 A_raw + C2 O_s_raw, FixPipe -> UB.
     }
 
-    __aicore__ inline void ProcessStage4(int64_t chunkIdx)
+    __aicore__ inline void ProcessStage4(uint32_t loopIdx, const ChunkFwdOChunkLoc &loc, int64_t hk, int64_t hv)
     {
-        (void)chunkIdx;
+        (void)loopIdx;
+        (void)loc;
+        (void)hk;
+        (void)hv;
         // P5 placeholder: C3 O_l = scale * (A' @ V), FixPipe -> UB.
     }
 
@@ -52,7 +58,7 @@ private:
     GM_ADDR chunkOffsets_;
     GM_ADDR o_;
     GM_ADDR workspace_;
-    const ChunkFwdOTilingData *tiling_ = nullptr;
+    ChunkFwdOTilingData tiling_{};
 };
 
 } // namespace GDN

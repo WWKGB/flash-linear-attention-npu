@@ -22,7 +22,7 @@
 #include "tiling_base/data_copy_transpose_tiling.h"
 #include "tiling_base/tiling_templates_registry.h"
 #include "../op_kernel/chunk_fwd_o_struct.h"
-#include "../op_kernel/arch35/chunk_fwd_o_common.h"
+#include "../op_kernel/chunk_fwd_o_a5_constants.h"
 #include "tiling/platform/platform_ascendc.h"
 
 using GDN::ChunkFwdOTilingData;
@@ -270,7 +270,49 @@ public:
                             "A5 chunk_fwd_o requires K=V=%ld, but got K=%ld V=%ld.",
                             CHUNK_FWD_O_A5_K, tiling_.kHeadDim, tiling_.vHeadDim),
                     return ge::GRAPH_FAILED);
+        OP_CHECK_IF(ctx_.dataType != CHUNK_FWD_O_DTYPE_BF16,
+                    OP_LOGE(ctx_.nodeName, "A5 chunk_fwd_o requires q/k/v/h in bf16."),
+                    return ge::GRAPH_FAILED);
+        OP_CHECK_IF(ctx_.gDataType != CHUNK_FWD_O_DTYPE_FP32 && ctx_.gDataType != CHUNK_FWD_O_DTYPE_BF16,
+                    OP_LOGE(ctx_.nodeName, "A5 chunk_fwd_o requires g in fp32 or bf16."),
+                    return ge::GRAPH_FAILED);
         return ge::GRAPH_SUCCESS;
+    }
+
+    static int64_t CeilDiv(int64_t a, int64_t b)
+    {
+        if (b == 0) {
+            return 0;
+        }
+        return (a + b - 1) / b;
+    }
+
+    ge::graphStatus A5ChunkTilingFixLen()
+    {
+        tiling_.numChunksPerBatch = CeilDiv(tiling_.seqlen, tiling_.chunkSize);
+        tiling_.chunkNum = tiling_.shapeBatch * tiling_.numChunksPerBatch;
+        tiling_.hvPerHk = tiling_.vNumHead / tiling_.kNumHead;
+        return ge::GRAPH_SUCCESS;
+    }
+
+    ge::graphStatus A5ChunkTilingVarLen()
+    {
+        OP_CHECK_IF(tiling_.shapeBatch != 1,
+                    OP_LOGE(ctx_.nodeName, "A5 varlen chunk_fwd_o requires batch=1."),
+                    return ge::GRAPH_FAILED);
+        const gert::Shape chunkOffsetsShape = ctx_.chunkOffsetsShape->GetStorageShape();
+        tiling_.chunkNum = chunkOffsetsShape.GetDim(CHUNK_FWD_O_DIM_BATCH) / CHUNK_FWD_O_CHUNK_OFFSETS_PAIR_SIZE;
+        tiling_.numChunksPerBatch = 0;
+        tiling_.hvPerHk = tiling_.vNumHead / tiling_.kNumHead;
+        return ge::GRAPH_SUCCESS;
+    }
+
+    ge::graphStatus A5ChunkTiling()
+    {
+        if (IsVariableLength()) {
+            return A5ChunkTilingVarLen();
+        }
+        return A5ChunkTilingFixLen();
     }
 
     ge::graphStatus WorkspaceTilingA5()
@@ -317,6 +359,7 @@ public:
         tiling_.useExp2 = ctx_.useExp2 ? 1 : 0;
         if (ctx_.npuArch == NpuArch::DAV_3510) {
             OP_CHECK_IF(A5ShapeCheck() != ge::GRAPH_SUCCESS, , return ge::GRAPH_FAILED);
+            OP_CHECK_IF(A5ChunkTiling() != ge::GRAPH_SUCCESS, , return ge::GRAPH_FAILED);
             OP_CHECK_IF(WorkspaceTilingA5() != ge::GRAPH_SUCCESS, , return ge::GRAPH_FAILED);
             return ge::GRAPH_SUCCESS;
         }

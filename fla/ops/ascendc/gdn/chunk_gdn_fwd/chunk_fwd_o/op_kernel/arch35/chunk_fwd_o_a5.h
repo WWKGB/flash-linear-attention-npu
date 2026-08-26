@@ -3,7 +3,6 @@
  * BSD 3-Clause License.
  *
  * A5 L1<->UB chunk_fwd_o path (Init -> S1 -> S2 -> S3 -> S4 -> S5).
- * P0 skeleton: launch + stage dispatch stubs; filled incrementally from P1.
  */
 
 #ifndef CHUNK_FWD_O_ARCH35_A5_H
@@ -17,7 +16,7 @@
 
 namespace GDN {
 
-template <typename InputT, typename GT>
+template <typename GT, bool UseExp2>
 class ChunkFwdOA5 {
 public:
     __aicore__ inline void Init(GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR h, GM_ADDR g, GM_ADDR cuSeqlens,
@@ -33,7 +32,7 @@ public:
         chunkOffsets_ = chunkOffsets;
         o_ = o;
         workspace_ = workspace;
-        tiling_ = tilingData;
+        tiling_ = *tilingData;
     }
 
     __aicore__ inline void Process()
@@ -49,22 +48,43 @@ public:
 private:
     __aicore__ inline void ProcessAic()
     {
-        ChunkFwdOA5CubeProcess<InputT, GT> cube(q_, k_, v_, h_, g_, cuSeqlens_, chunkOffsets_, o_, workspace_);
-        cube.Init(*tiling_);
-        // P0: single-chunk serial placeholder loop.
-        cube.ProcessStage2(0);
-        cube.ProcessStage4(0);
+        ChunkFwdOA5CubeProcess<GT> cube(q_, k_, v_, h_, g_, cuSeqlens_, chunkOffsets_, o_, workspace_);
+        cube.Init(tiling_);
+
+        const uint32_t coreIdx = AscendC::GetBlockIdx();
+        const uint32_t coreNum = AscendC::GetBlockNum();
+        ChunkFwdOChunkLoc loc;
+
+        for (uint32_t loopIdx = coreIdx; loopIdx < static_cast<uint32_t>(tiling_.chunkNum); loopIdx += coreNum) {
+            ChunkFwdOResolveChunkLoc(cuSeqlens_, chunkOffsets_, tiling_, loopIdx, loc);
+            for (int64_t hv = 0; hv < tiling_.vNumHead; ++hv) {
+                const int64_t hk = hv / tiling_.hvPerHk;
+                cube.ProcessStage2(loopIdx, loc, hk, hv);
+                cube.ProcessStage4(loopIdx, loc, hk, hv);
+            }
+        }
     }
 
     __aicore__ inline void ProcessAiv()
     {
         AscendC::TPipe pipe;
-        ChunkFwdOA5VectorProcess<InputT, GT> vector(q_, k_, v_, h_, g_, cuSeqlens_, chunkOffsets_, o_, workspace_);
-        vector.Init(*tiling_, &pipe);
+        ChunkFwdOA5VectorProcess<GT, UseExp2> vector(q_, k_, v_, h_, g_, cuSeqlens_, chunkOffsets_, o_, workspace_);
+        vector.Init(tiling_, &pipe);
         vector.ProcessInit();
-        vector.ProcessStage1(0);
-        vector.ProcessStage3(0);
-        vector.ProcessStage5(0);
+
+        const uint32_t coreIdx = AscendC::GetBlockIdx();
+        const uint32_t coreNum = AscendC::GetBlockNum();
+        ChunkFwdOChunkLoc loc;
+
+        for (uint32_t loopIdx = coreIdx; loopIdx < static_cast<uint32_t>(tiling_.chunkNum); loopIdx += coreNum) {
+            ChunkFwdOResolveChunkLoc(cuSeqlens_, chunkOffsets_, tiling_, loopIdx, loc);
+            for (int64_t hv = 0; hv < tiling_.vNumHead; ++hv) {
+                const int64_t hk = hv / tiling_.hvPerHk;
+                vector.ProcessStage1(loopIdx, loc, hk, hv);
+                vector.ProcessStage3(loopIdx, loc, hk, hv);
+                vector.ProcessStage5(loopIdx, loc, hk, hv);
+            }
+        }
     }
 
     GM_ADDR q_ = nullptr;
@@ -76,15 +96,15 @@ private:
     GM_ADDR chunkOffsets_ = nullptr;
     GM_ADDR o_ = nullptr;
     GM_ADDR workspace_ = nullptr;
-    const ChunkFwdOTilingData *tiling_ = nullptr;
+    ChunkFwdOTilingData tiling_{};
 };
 
-template <typename InputT, typename GT>
+template <typename GT, bool UseExp2>
 __aicore__ inline void ChunkFwdOA5Dispatch(GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR h, GM_ADDR g,
                                            GM_ADDR cuSeqlens, GM_ADDR chunkOffsets, GM_ADDR o, GM_ADDR workspace,
                                            const ChunkFwdOTilingData *tilingData)
 {
-    ChunkFwdOA5<InputT, GT> op;
+    ChunkFwdOA5<GT, UseExp2> op;
     op.Init(q, k, v, h, g, cuSeqlens, chunkOffsets, o, workspace, tilingData);
     op.Process();
 }

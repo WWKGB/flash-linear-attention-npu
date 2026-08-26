@@ -38,6 +38,9 @@ struct ChunkFwdOTilingData {
     int64_t maskWorkspaceOffset;
     int64_t useExp2;
     float scale;
+    int64_t chunkNum;
+    int64_t hvPerHk;
+    int64_t numChunksPerBatch;
 };
 
 } // namespace GDN
