@@ -7,34 +7,82 @@
 #define CHUNK_FWD_O_ARCH35_VECTOR_H
 
 #include "kernel_operator.h"
+#include "kernel_utils/vector/regbase.hpp"
 #include "../chunk_fwd_o_struct.h"
 #include "chunk_fwd_o_common.h"
 
 namespace GDN {
 
 using namespace AscendC;
+using namespace AscendC::MicroAPI;
 
-// P1 · Init causal mask (kernel-level, once per launch).
-__simd_vf__ inline void InitCausalMask(__ubuf__ uint8_t *maskAddr, int64_t seqlen, int64_t chunkSize)
+constexpr float CHUNK_FWD_O_LN2 = 0.69314718055994530941723212145818f;
+constexpr uint32_t CHUNK_FWD_O_UB_ALIGN = 32;
+
+__simd_callee__ inline void LoadGateFloatPair(RegTensor<float> &zero, RegTensor<float> &one, __ubuf__ float *src)
 {
-    (void)maskAddr;
-    (void)seqlen;
-    (void)chunkSize;
+    LoadAlign<float, LoadDist::DIST_DINTLV_B32>(zero, one, src);
 }
 
-// P2 · Stage1 gate precompute.
+__simd_callee__ inline void StoreGateFloatPair(__ubuf__ float *dst, RegTensor<float> &zero, RegTensor<float> &one,
+                                              MaskReg &maskF32)
+{
+    StoreAlign<float, StoreDist::DIST_INTLV_B32>(dst, zero, one, maskF32);
+}
+
+// P1 · causal mask m_A[C,C] in uint8, lower-triangular with i >= j.
+__aicore__ inline void BuildCausalMaskU8(LocalTensor<uint8_t> &mask, uint32_t chunkLen)
+{
+    const uint32_t bt = static_cast<uint32_t>(CHUNK_FWD_O_A5_BT);
+    for (uint32_t row = 0; row < bt; ++row) {
+        for (uint32_t col = 0; col < bt; ++col) {
+            const uint8_t valid = (row < chunkLen && col < chunkLen && row >= col) ? 1 : 0;
+            mask.SetValue(row * bt + col, valid);
+        }
+    }
+}
+
+// P2 · gate_o[C] = exp_fn(g), gate_A[C,C] = exp_fn(g[i]-g[j]).
 template <bool UseExp2>
-__simd_vf__ inline void Stage1Gate(__ubuf__ float *gateOAddr, __ubuf__ float *gateAAddr, __ubuf__ float *gAddr,
-                                   int64_t chunkLen)
+__simd_vf__ inline void Stage1Gate64VF(__ubuf__ float *gateOAddr, __ubuf__ float *gateAAddr, __ubuf__ float *gAddr,
+                                       uint16_t chunkLen)
 {
-    (void)gateOAddr;
-    (void)gateAAddr;
-    (void)gAddr;
     (void)chunkLen;
-    (void)UseExp2;
+    constexpr uint16_t kBt = static_cast<uint16_t>(CHUNK_FWD_O_A5_BT);
+    MaskReg maskFull32 = CreateMask<float, MaskPattern::ALL>();
+
+    RegTensor<float> gZeroReg;
+    RegTensor<float> gOneReg;
+    RegTensor<float> gateZeroReg;
+    RegTensor<float> gateOneReg;
+    RegTensor<float> gRowReg;
+    RegTensor<float> rowGateZeroReg;
+    RegTensor<float> rowGateOneReg;
+
+    LoadGateFloatPair(gZeroReg, gOneReg, gAddr);
+
+    Duplicate(gateZeroReg, gZeroReg, maskFull32);
+    Duplicate(gateOneReg, gOneReg, maskFull32);
+    if constexpr (UseExp2) {
+        Muls(gateZeroReg, gateZeroReg, CHUNK_FWD_O_LN2, maskFull32);
+        Muls(gateOneReg, gateOneReg, CHUNK_FWD_O_LN2, maskFull32);
+    }
+    ExpFloatTwoReg(gateZeroReg, gateOneReg, gateZeroReg, gateOneReg, maskFull32);
+    StoreGateFloatPair(gateOAddr, gateZeroReg, gateOneReg, maskFull32);
+
+    for (uint16_t row = 0; row < kBt; ++row) {
+        LoadIn<float, true>(gRowReg, gAddr + row);
+        SubFloatTwoReg(rowGateZeroReg, rowGateOneReg, gRowReg, gRowReg, gZeroReg, gOneReg, maskFull32);
+        if constexpr (UseExp2) {
+            Muls(rowGateZeroReg, rowGateZeroReg, CHUNK_FWD_O_LN2, maskFull32);
+            Muls(rowGateOneReg, rowGateOneReg, CHUNK_FWD_O_LN2, maskFull32);
+        }
+        ExpFloatTwoReg(rowGateZeroReg, rowGateOneReg, rowGateZeroReg, rowGateOneReg, maskFull32);
+        StoreGateFloatPair(gateAAddr + static_cast<uint32_t>(row) * kBt, rowGateZeroReg, rowGateOneReg, maskFull32);
+    }
 }
 
-// P4 · Stage3 gate application + causal mask; A' -> L1, O_s' -> UB.
+// P4 · Stage3 gate application + causal mask (stub until P4).
 __simd_vf__ inline void Stage3GateMask(__ubuf__ float *aRawAddr, __ubuf__ float *oSRawAddr,
                                        __ubuf__ float *gateOAddr, __ubuf__ float *gateAAddr,
                                        __ubuf__ uint8_t *maskAddr, __ubuf__ float *oSPrimeAddr, int64_t chunkLen)
@@ -48,7 +96,7 @@ __simd_vf__ inline void Stage3GateMask(__ubuf__ float *aRawAddr, __ubuf__ float 
     (void)chunkLen;
 }
 
-// P6 · Stage5 fuse and write back.
+// P6 · Stage5 fuse (stub until P6).
 __simd_vf__ inline void Stage5Fuse(__ubuf__ float *oSPrimeAddr, __ubuf__ float *oLAddr, __ubuf__ bfloat16_t *oOutAddr,
                                    float scale, int64_t chunkLen)
 {
@@ -71,22 +119,58 @@ public:
 
     __aicore__ inline void Init(const ChunkFwdOTilingData &tiling, TPipe *pipe)
     {
-        (void)pipe;
         tiling_ = tiling;
+        pipe_ = pipe;
+
+        const uint32_t bt = static_cast<uint32_t>(CHUNK_FWD_O_A5_BT);
+        pipe_->InitBuffer(gInQue_, 1, bt * sizeof(GT));
+        pipe_->InitBuffer(gFp32Buf_, bt * sizeof(float));
+        pipe_->InitBuffer(gateOBuf_, bt * sizeof(float));
+        pipe_->InitBuffer(gateABuf_, bt * bt * sizeof(float));
+        pipe_->InitBuffer(maskBuf_, bt * bt * sizeof(uint8_t));
     }
 
     __aicore__ inline void ProcessInit()
     {
-        // P1 placeholder: materialize m_A into UB fixed region.
+        LocalTensor<uint8_t> mask = maskBuf_.Get<uint8_t>();
+        const uint32_t chunkLen = static_cast<uint32_t>(tiling_.chunkSize);
+        BuildCausalMaskU8(mask, chunkLen);
     }
 
     __aicore__ inline void ProcessStage1(uint32_t loopIdx, const ChunkFwdOChunkLoc &loc, int64_t hk, int64_t hv)
     {
         (void)loopIdx;
-        (void)loc;
         (void)hk;
-        (void)hv;
-        // P2 placeholder.
+
+        GlobalTensor<GT> gGm;
+        gGm.SetGlobalBuffer((__gm__ GT *)g_);
+        const int64_t gOffset = ChunkFwdOGOffset(tiling_, loc, hv);
+
+        LocalTensor<GT> gLocal = gInQue_.AllocTensor<GT>();
+        DataCopyPad(gLocal, gGm[gOffset],
+                    {1, static_cast<uint32_t>(loc.chunkLen * sizeof(GT)), 0, 0, 0},
+                    {false, 0, 0, 0});
+        gInQue_.EnQue(gLocal);
+        gLocal = gInQue_.DeQue<GT>();
+
+        LocalTensor<float> gFp32 = gFp32Buf_.Get<float>();
+        if constexpr (std::is_same<GT, float>::value) {
+            DataCopy(gFp32, gLocal, loc.chunkLen);
+        } else {
+            Cast(gFp32, gLocal, RoundMode::CAST_NONE, loc.chunkLen);
+        }
+        gInQue_.FreeTensor(gLocal);
+        if (loc.chunkLen < static_cast<uint32_t>(CHUNK_FWD_O_A5_BT)) {
+            Duplicate(gFp32[loc.chunkLen], static_cast<float>(0), static_cast<int32_t>(CHUNK_FWD_O_A5_BT - loc.chunkLen));
+        }
+        PipeBarrier<PIPE_V>();
+
+        LocalTensor<float> gateO = gateOBuf_.Get<float>();
+        LocalTensor<float> gateA = gateABuf_.Get<float>();
+        AscendC::VF_CALL<Stage1Gate64VF<UseExp2>>(
+            (__ubuf__ float *)gateO.GetPhyAddr(), (__ubuf__ float *)gateA.GetPhyAddr(),
+            (__ubuf__ float *)gFp32.GetPhyAddr(), static_cast<uint16_t>(loc.chunkLen));
+        PipeBarrier<PIPE_V>();
     }
 
     __aicore__ inline void ProcessStage3(uint32_t loopIdx, const ChunkFwdOChunkLoc &loc, int64_t hk, int64_t hv)
@@ -95,7 +179,6 @@ public:
         (void)loc;
         (void)hk;
         (void)hv;
-        // P4 placeholder.
     }
 
     __aicore__ inline void ProcessStage5(uint32_t loopIdx, const ChunkFwdOChunkLoc &loc, int64_t hk, int64_t hv)
@@ -104,7 +187,6 @@ public:
         (void)loc;
         (void)hk;
         (void)hv;
-        // P6 placeholder.
     }
 
 private:
@@ -118,6 +200,13 @@ private:
     GM_ADDR o_;
     GM_ADDR workspace_;
     ChunkFwdOTilingData tiling_{};
+    TPipe *pipe_ = nullptr;
+
+    TQue<TPosition::VECIN, 1> gInQue_;
+    TBuf<TPosition::VECCALC> gFp32Buf_;
+    TBuf<TPosition::VECCALC> gateOBuf_;
+    TBuf<TPosition::VECCALC> gateABuf_;
+    TBuf<TPosition::VECCALC> maskBuf_;
 };
 
 } // namespace GDN
