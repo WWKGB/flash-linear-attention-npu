@@ -317,8 +317,18 @@ public:
 
     ge::graphStatus WorkspaceTilingA5()
     {
-        // A5 L1<->UB path: CrossCore uses hardware flag IDs only; no user GM sync region.
-        workspaceSize_ = ctx_.sysWorkspaceSize;
+        // User workspace: debug header + per-(chunk,hv) stage dump slots (development).
+        const size_t headerBytes = static_cast<size_t>(GDN::CHUNK_FWD_O_DBG_HEADER_BYTES);
+        const size_t slotBytes = static_cast<size_t>(GDN::CHUNK_FWD_O_DBG_SLOT_BYTES);
+        const size_t numSlots =
+            static_cast<size_t>(tiling_.chunkNum) * static_cast<size_t>(tiling_.vNumHead);
+        size_t userBytes = headerBytes + numSlots * slotBytes;
+        userBytes = AlignWorkspaceSize(userBytes);
+
+        tiling_.debugDumpOffset = static_cast<int64_t>(ctx_.sysWorkspaceSize);
+        tiling_.debugDumpSlotBytes = static_cast<int64_t>(slotBytes);
+        tiling_.aPrimeWorkspaceOffset = static_cast<int64_t>(ctx_.sysWorkspaceSize + userBytes);
+        workspaceSize_ = ctx_.sysWorkspaceSize + userBytes;
         return ge::GRAPH_SUCCESS;
     }
 

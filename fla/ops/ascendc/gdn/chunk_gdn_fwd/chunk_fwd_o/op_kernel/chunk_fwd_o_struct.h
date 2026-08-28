@@ -41,6 +41,9 @@ struct ChunkFwdOTilingData {
     int64_t chunkNum;
     int64_t hvPerHk;
     int64_t numChunksPerBatch;
+    int64_t debugDumpOffset;
+    int64_t debugDumpSlotBytes;
+    int64_t aPrimeWorkspaceOffset;
 };
 
 } // namespace GDN

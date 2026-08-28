@@ -16,6 +16,26 @@ constexpr int64_t CHUNK_FWD_O_A5_BT = 64;
 constexpr int64_t CHUNK_FWD_O_A5_K = 128;
 constexpr int64_t CHUNK_FWD_O_A5_V = 128;
 
+// Debug dump layout (development-only GM workspace after sys workspace).
+constexpr uint32_t CHUNK_FWD_O_DBG_MAGIC = 0xCF0DA5U;
+constexpr uint32_t CHUNK_FWD_O_DBG_VERSION = 1U;
+constexpr uint32_t CHUNK_FWD_O_DBG_HEADER_BYTES = 64U;
+constexpr uint32_t CHUNK_FWD_O_DBG_MASK_BYTES = 4U * 1024U;
+constexpr uint32_t CHUNK_FWD_O_DBG_GATE_O_BYTES = static_cast<uint32_t>(CHUNK_FWD_O_A5_BT * sizeof(float));
+constexpr uint32_t CHUNK_FWD_O_DBG_GATE_A_BYTES =
+    static_cast<uint32_t>(CHUNK_FWD_O_A5_BT * CHUNK_FWD_O_A5_BT * sizeof(float));
+constexpr uint32_t CHUNK_FWD_O_DBG_ARAW_BYTES =
+    static_cast<uint32_t>(CHUNK_FWD_O_A5_BT * CHUNK_FWD_O_A5_BT * 2U); // bf16
+constexpr uint32_t CHUNK_FWD_O_DBG_OSRAW_BYTES =
+    static_cast<uint32_t>(CHUNK_FWD_O_A5_BT * CHUNK_FWD_O_A5_V * 2U); // bf16
+constexpr uint32_t CHUNK_FWD_O_DBG_MASK_OFF = 0U;
+constexpr uint32_t CHUNK_FWD_O_DBG_GATE_O_OFF = CHUNK_FWD_O_DBG_MASK_BYTES;
+constexpr uint32_t CHUNK_FWD_O_DBG_GATE_A_OFF = CHUNK_FWD_O_DBG_GATE_O_OFF + CHUNK_FWD_O_DBG_GATE_O_BYTES;
+constexpr uint32_t CHUNK_FWD_O_DBG_ARAW_OFF = CHUNK_FWD_O_DBG_GATE_A_OFF + CHUNK_FWD_O_DBG_GATE_A_BYTES;
+constexpr uint32_t CHUNK_FWD_O_DBG_OSRAW_OFF = CHUNK_FWD_O_DBG_ARAW_OFF + CHUNK_FWD_O_DBG_ARAW_BYTES;
+constexpr uint32_t CHUNK_FWD_O_DBG_SLOT_BYTES =
+    (CHUNK_FWD_O_DBG_OSRAW_OFF + CHUNK_FWD_O_DBG_OSRAW_BYTES + 511U) / 512U * 512U;
+
 } // namespace GDN
 
 #endif // CHUNK_FWD_O_A5_CONSTANTS_H
