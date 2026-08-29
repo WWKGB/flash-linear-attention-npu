@@ -276,6 +276,10 @@ public:
         OP_CHECK_IF(ctx_.gDataType != CHUNK_FWD_O_DTYPE_FP32 && ctx_.gDataType != CHUNK_FWD_O_DTYPE_BF16,
                     OP_LOGE(ctx_.nodeName, "A5 chunk_fwd_o requires g in fp32 or bf16."),
                     return ge::GRAPH_FAILED);
+        const int64_t headRatio = tiling_.vNumHead / tiling_.kNumHead;
+        OP_CHECK_IF(headRatio < 1 || headRatio > 4,
+                    OP_LOGE(ctx_.nodeName, "A5 chunk_fwd_o requires HV/HK in [1,4], but got %ld.", headRatio),
+                    return ge::GRAPH_FAILED);
         return ge::GRAPH_SUCCESS;
     }
 
@@ -292,6 +296,7 @@ public:
         tiling_.numChunksPerBatch = CeilDiv(tiling_.seqlen, tiling_.chunkSize);
         tiling_.chunkNum = tiling_.shapeBatch * tiling_.numChunksPerBatch;
         tiling_.hvPerHk = tiling_.vNumHead / tiling_.kNumHead;
+        tiling_.taskGroupSize = tiling_.hvPerHk == 3 ? 3 : 4;
         return ge::GRAPH_SUCCESS;
     }
 
@@ -304,6 +309,7 @@ public:
         tiling_.chunkNum = chunkOffsetsShape.GetDim(CHUNK_FWD_O_DIM_BATCH) / CHUNK_FWD_O_CHUNK_OFFSETS_PAIR_SIZE;
         tiling_.numChunksPerBatch = 0;
         tiling_.hvPerHk = tiling_.vNumHead / tiling_.kNumHead;
+        tiling_.taskGroupSize = tiling_.hvPerHk == 3 ? 3 : 4;
         return ge::GRAPH_SUCCESS;
     }
 

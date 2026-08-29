@@ -23,32 +23,61 @@ constexpr uint32_t CHUNK_FWD_O_UB_MASK_BYTES = 4U * 1024U;
 constexpr uint32_t CHUNK_FWD_O_UB_GATE_BYTES = 64U * 1024U;
 constexpr uint32_t CHUNK_FWD_O_UB_CUBE_BASE = 68U * 1024U;
 constexpr uint32_t CHUNK_FWD_O_UB_ARAW_BYTES = 8U * 1024U;   // 64x64 bf16
-constexpr uint32_t CHUNK_FWD_O_UB_OSRAW_BYTES = 32U * 1024U; // 64x128 fp32
+constexpr uint32_t CHUNK_FWD_O_UB_OSRAW_BYTES = 16U * 1024U; // 64x128 bf16
+constexpr uint32_t CHUNK_FWD_O_UB_GATE_SLOT_BYTES = 32U * 1024U;
+constexpr uint32_t CHUNK_FWD_O_UB_CUBE_SLOT_BYTES = 24U * 1024U;
+constexpr uint32_t CHUNK_FWD_O_UB_GATE_BASE = 4U * 1024U;
 constexpr uint32_t CHUNK_FWD_O_UB_ARAW_OFFSET = CHUNK_FWD_O_UB_CUBE_BASE;
-constexpr uint32_t CHUNK_FWD_O_UB_OSRAW_OFFSET = CHUNK_FWD_O_UB_ARAW_OFFSET + CHUNK_FWD_O_UB_ARAW_BYTES;
+constexpr uint32_t CHUNK_FWD_O_UB_OSRAW_OFFSET =
+    CHUNK_FWD_O_UB_ARAW_OFFSET + CHUNK_FWD_O_UB_ARAW_BYTES;
 constexpr uint32_t CHUNK_FWD_O_UB_OSPRIME_OFFSET = 116U * 1024U;
 constexpr uint32_t CHUNK_FWD_O_UB_OSPRIME_BYTES = 32U * 1024U;
-constexpr uint32_t CHUNK_FWD_O_UB_APRIME_FP32_OFFSET = 148U * 1024U;
+constexpr uint32_t CHUNK_FWD_O_UB_APRIME_FP32_OFFSET = 212U * 1024U;
 constexpr uint32_t CHUNK_FWD_O_UB_APRIME_FP32_BYTES = 16U * 1024U;
-constexpr uint32_t CHUNK_FWD_O_UB_STAGE3_END =
-    CHUNK_FWD_O_UB_APRIME_FP32_OFFSET + CHUNK_FWD_O_UB_APRIME_FP32_BYTES;
+constexpr uint32_t CHUNK_FWD_O_UB_G_FP32_SCRATCH_OFFSET = 228U * 1024U;
+constexpr uint32_t CHUNK_FWD_O_UB_G_INPUT_SCRATCH_OFFSET =
+    CHUNK_FWD_O_UB_G_FP32_SCRATCH_OFFSET + 256U;
+constexpr uint32_t CHUNK_FWD_O_UB_TOTAL_BYTES = 248U * 1024U;
+constexpr uint32_t CHUNK_FWD_O_UB_STAGE3_END = CHUNK_FWD_O_UB_TOTAL_BYTES;
+
+__aicore__ inline uint32_t ChunkFwdOGateOOffset(uint32_t slot)
+{
+    return CHUNK_FWD_O_UB_GATE_BASE + slot * CHUNK_FWD_O_UB_GATE_SLOT_BYTES;
+}
+
+__aicore__ inline uint32_t ChunkFwdOGateAOffset(uint32_t slot)
+{
+    return ChunkFwdOGateOOffset(slot) + 256U;
+}
+
+__aicore__ inline uint32_t ChunkFwdOARawOffset(uint32_t slot)
+{
+    return CHUNK_FWD_O_UB_CUBE_BASE + slot * CHUNK_FWD_O_UB_CUBE_SLOT_BYTES;
+}
+
+__aicore__ inline uint32_t ChunkFwdOOSRawOffset(uint32_t slot)
+{
+    return ChunkFwdOARawOffset(slot) + CHUNK_FWD_O_UB_ARAW_BYTES;
+}
 
 // L1 scratch for S2 (KiB layout in design §Stage2).
 constexpr uint32_t CHUNK_FWD_O_L1_Q_OFFSET = 0U;
 constexpr uint32_t CHUNK_FWD_O_L1_K_OFFSET = 16U * 1024U;
 constexpr uint32_t CHUNK_FWD_O_L1_H_OFFSET = 32U * 1024U;
-constexpr uint32_t CHUNK_FWD_O_L0C_QH_OFFSET = 16U * 1024U;
+constexpr uint32_t CHUNK_FWD_O_L0AB_QH_OFFSET = 32U * 1024U;
+constexpr uint32_t CHUNK_FWD_O_L0C_QH_OFFSET = 32U * 1024U;
 
-// FixPipe -> UB handshake (mode 0x4, one AIC + two AIV subblocks).
-// Use non-zero flag IDs (same band as chunk_kda_fwd_fwd_h direct UB: 6/7).
-constexpr uint64_t CHUNK_FWD_O_CUBE_UB_FREE_FLAG = 6;
-constexpr uint64_t CHUNK_FWD_O_CUBE_UB_READY_FLAG = 7;
-constexpr uint64_t CHUNK_FWD_O_SUBBLOCK_FLAG_STRIDE = 16;
+// PR404-style mode=0x2 ordered chains. Per-head IDs allow Stage1(head N+1)
+// to overlap Stage2(head N) without reusing an unconsumed fixed flag.
+constexpr uint64_t CHUNK_FWD_O_VEC_TO_CUBE_RELEASE_FLAG = 1;
+constexpr uint64_t CHUNK_FWD_O_S1_GROUP_DONE_FLAG = 2;
+constexpr uint64_t CHUNK_FWD_O_S1_READY_BASE = 4;
 
 // CrossCore hardware flag IDs (P7). Same pattern as chunk_gated_delta_rule_fwd_h / recompute_w_u_fwd.
-constexpr uint32_t CHUNK_FWD_O_CC_CUBE_READY_BASE = 8;    // AIC -> AIV, sync_idx in [0,3]
+constexpr uint32_t CHUNK_FWD_O_CC_CUBE_READY_BASE = 8;    // AIC -> AIV, headOffset in [0,3]
 constexpr uint32_t CHUNK_FWD_O_CC_APRIME_READY_BASE = 12; // AIV -> AIC
 constexpr uint32_t CHUNK_FWD_O_CC_OL_READY_BASE = 16;     // AIC -> AIV
+constexpr uint32_t CHUNK_FWD_O_CC_SLOT_RELEASE_BASE = 20; // AIV -> AIC, headOffset in [0,3]
 
 __aicore__ inline uint32_t ChunkFwdOCubeReadyFlagId(int64_t syncIdx)
 {

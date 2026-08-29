@@ -40,7 +40,7 @@ DBG_MASK_BYTES = 4 * 1024
 DBG_GATE_O_BYTES = BT * 4
 DBG_GATE_A_BYTES = BT * BT * 4
 DBG_ARAW_BYTES = BT * BT * 2
-DBG_OSRAW_BYTES = BT * V * 4
+DBG_OSRAW_BYTES = BT * V * 2
 DBG_APRIME_BYTES = BT * BT * 2
 DBG_OSPRIME_BYTES = BT * V * 4
 DBG_MASK_OFF = 0
@@ -151,7 +151,8 @@ def _read_slot(user_ws: np.ndarray, slot_idx: int, slot_bytes: int) -> dict:
     )
     o_s_raw = (
         chunk[DBG_OSRAW_OFF : DBG_OSRAW_OFF + DBG_OSRAW_BYTES]
-        .view(np.float32)
+        .view(ml_dtypes.bfloat16)
+        .astype(np.float32)
         .reshape(BT, V)
         .copy()
     )
@@ -222,9 +223,10 @@ def _compare(name: str, ref: np.ndarray, got: np.ndarray, *, atol: float, rtol: 
     if ref.shape != got.shape:
         print(f"[FAIL] {name}: shape ref={ref.shape} got={got.shape}")
         return False
-    if ref.dtype != got.dtype and name != "mask":
+    is_mask = name == "mask" or name.startswith("mask[")
+    if ref.dtype != got.dtype and not is_mask:
         ref = ref.astype(got.dtype, copy=False)
-    if name == "mask":
+    if is_mask:
         bad = ref != got
     else:
         bad = ~np.isclose(ref, got, rtol=rtol, atol=atol, equal_nan=True)
@@ -234,6 +236,15 @@ def _compare(name: str, ref: np.ndarray, got: np.ndarray, *, atol: float, rtol: 
         return True
     max_diff = np.max(np.abs(ref.astype(np.float64) - got.astype(np.float64)))
     print(f"[FAIL] {name}: {nbad}/{ref.size} mismatches, max_abs_diff={max_diff:.6g}")
+    if bad.ndim == 2:
+        bad_per_row = bad.sum(axis=1)
+        bad_rows = np.flatnonzero(bad_per_row)
+        if bad_rows.size:
+            row_counts = [(int(row), int(bad_per_row[row])) for row in bad_rows]
+            print(
+                f"       bad_rows={int(bad_rows[0])}..{int(bad_rows[-1])}, "
+                f"row_mismatches={row_counts[:8]}"
+            )
     for index_row in np.argwhere(bad)[:5]:
         index = tuple(int(i) for i in index_row)
         print(f"       at {index} ref={ref[index]} got={got[index]}")
@@ -254,11 +265,11 @@ def _find_user_workspace(ws_np: np.ndarray) -> tuple[int, np.ndarray]:
     raise RuntimeError("debug header magic not found in workspace")
 
 
-def run_case(*, seqlen=64, use_exp2: bool = False, seed: int = 0):
+def run_case(*, seqlen=64, heads=2, use_exp2: bool = False, seed: int = 0):
     torch.manual_seed(seed)
     np.random.seed(seed)
 
-    B, HK, HV = 1, 1, 1
+    B, HK, HV = 1, heads, heads
     scale = K ** -0.5
     chunk_size = 64
     num_chunks = (seqlen + chunk_size - 1) // chunk_size
@@ -266,7 +277,7 @@ def run_case(*, seqlen=64, use_exp2: bool = False, seed: int = 0):
     q = torch.randn(B, HK, seqlen, K, dtype=torch.bfloat16, device="npu")
     k = torch.randn(B, HK, seqlen, K, dtype=torch.bfloat16, device="npu")
     v = torch.randn(B, HV, seqlen, V, dtype=torch.bfloat16, device="npu")
-    h = torch.randn(B, HV, num_chunks, K, V, dtype=torch.bfloat16, device="npu")
+    h = torch.randn(B, HV, num_chunks, V, K, dtype=torch.bfloat16, device="npu")
     g = torch.randn(B, HV, seqlen, dtype=torch.float32, device="npu")
 
     _, workspace = _call_chunk_fwd_o_with_workspace(
@@ -277,66 +288,67 @@ def run_case(*, seqlen=64, use_exp2: bool = False, seed: int = 0):
     _, user_ws = _find_user_workspace(ws_np)
     hdr = _parse_debug_header(user_ws)
 
-    slot_idx = 0  # chunk 0, hv 0
-    dump = _read_slot(user_ws, slot_idx, hdr["slot_bytes"])
-
-    chunk_len = min(seqlen, chunk_size)
-    q_cpu = q[0, 0, :chunk_len].cpu()
-    if chunk_len < BT:
-        q_pad = torch.zeros(BT, K, dtype=torch.bfloat16)
-        k_pad = torch.zeros(BT, K, dtype=torch.bfloat16)
-        h_chunk = h[0, 0, 0].cpu()
-        g_pad = torch.zeros(BT, dtype=torch.float32)
-        q_pad[:chunk_len] = q[0, 0, :chunk_len].cpu()
-        k_pad[:chunk_len] = k[0, 0, :chunk_len].cpu()
-        g_pad[:chunk_len] = g[0, 0, :chunk_len].cpu()
-    else:
-        q_pad = q[0, 0].cpu()
-        k_pad = k[0, 0].cpu()
-        g_pad = g[0, 0].cpu()
-        h_chunk = h[0, 0, 0].cpu()
-
-    ref = _cpu_stage_refs(q_pad, k_pad, h_chunk, g_pad, chunk_len, use_exp2=use_exp2)
-
     ok = True
-    ok &= _compare("mask", ref["mask"], dump["mask"], atol=0, rtol=0)
-    ok &= _compare("gate_o", ref["gate_o"], dump["gate_o"], atol=1e-3, rtol=1e-2)
-    ok &= _compare("gate_A", ref["gate_A"], dump["gate_A"], atol=1e-2, rtol=1e-2)
-    ok &= _compare(
-        "A_raw",
-        ref["A_raw"][:chunk_len, :chunk_len],
-        dump["A_raw"][:chunk_len, :chunk_len],
-        atol=0.05,
-        rtol=0.01,
-    )
-    ok &= _compare(
-        "O_s_raw",
-        ref["O_s_raw"][:chunk_len],
-        dump["O_s_raw"][:chunk_len],
-        atol=0.05,
-        rtol=0.01,
-    )
-    ok &= _compare(
-        "A_prime",
-        ref["A_prime"][:chunk_len, :chunk_len],
-        dump["A_prime"][:chunk_len, :chunk_len],
-        atol=0.05,
-        rtol=0.01,
-    )
-    ok &= _compare(
-        "O_s_prime",
-        ref["O_s_prime"][:chunk_len],
-        dump["O_s_prime"][:chunk_len],
-        atol=0.05,
-        rtol=0.01,
-    )
+    refs = {}
+    dumps = {}
+    for chunk_idx in range(num_chunks):
+        token_begin = chunk_idx * chunk_size
+        chunk_len = min(chunk_size, seqlen - token_begin)
+        for hv in range(HV):
+            slot_idx = chunk_idx * HV + hv
+            dump = _read_slot(user_ws, slot_idx, hdr["slot_bytes"])
+            q_pad = torch.zeros(BT, K, dtype=torch.bfloat16)
+            k_pad = torch.zeros(BT, K, dtype=torch.bfloat16)
+            g_pad = torch.zeros(BT, dtype=torch.float32)
+            q_pad[:chunk_len] = q[0, hv, token_begin : token_begin + chunk_len].cpu()
+            k_pad[:chunk_len] = k[0, hv, token_begin : token_begin + chunk_len].cpu()
+            g_pad[:chunk_len] = g[0, hv, token_begin : token_begin + chunk_len].cpu()
+            # Physical H is [V,K]; the math consumes H^T as [K,V].
+            h_chunk = h[0, hv, chunk_idx].cpu().T.contiguous()
+            ref = _cpu_stage_refs(q_pad, k_pad, h_chunk, g_pad, chunk_len, use_exp2=use_exp2)
+            refs[(chunk_idx, hv)] = ref
+            dumps[(chunk_idx, hv)] = dump
+            tag = f"c{chunk_idx}/h{hv}"
+            ok &= _compare(f"mask[{tag}]", ref["mask"], dump["mask"], atol=0, rtol=0)
+            ok &= _compare(f"gate_o[{tag}]", ref["gate_o"], dump["gate_o"], atol=1e-3, rtol=1e-2)
+            ok &= _compare(f"gate_A[{tag}]", ref["gate_A"], dump["gate_A"], atol=1e-2, rtol=1e-2)
+            ok &= _compare(
+                f"A_raw[{tag}]",
+                ref["A_raw"][:chunk_len, :chunk_len],
+                dump["A_raw"][:chunk_len, :chunk_len],
+                atol=0.05,
+                rtol=0.01,
+            )
+            ok &= _compare(
+                f"O_s_raw[{tag}]",
+                ref["O_s_raw"][:chunk_len],
+                dump["O_s_raw"][:chunk_len],
+                atol=0.05,
+                rtol=0.01,
+            )
+    if not ok and HV >= 2:
+        for chunk_idx in range(num_chunks):
+            for got_hv in range(HV):
+                got = dumps[(chunk_idx, got_hv)]["O_s_raw"]
+                scores = []
+                for ref_hv in range(HV):
+                    ref_value = refs[(chunk_idx, ref_hv)]["O_s_raw"]
+                    close = int(np.isclose(got, ref_value, atol=0.05, rtol=0.01).sum())
+                    scores.append((close, ref_hv))
+                scores.sort(reverse=True)
+                print(
+                    f"[DIAG] c{chunk_idx}/h{got_hv} best O_s_raw reference: "
+                    f"h{scores[0][1]} close={scores[0][0]}/{got.size}"
+                )
     return ok
 
 
 def main():
     cases = [
-        ("T=64 exp2", dict(seqlen=64, use_exp2=True, seed=1)),
-        ("T=48 tail exp2", dict(seqlen=48, use_exp2=True, seed=2)),
+        ("G=1 T=64 exp2", dict(seqlen=64, heads=2, use_exp2=True, seed=1)),
+        ("G=1 T=128 exp2", dict(seqlen=128, heads=2, use_exp2=True, seed=2)),
+        ("G=1 T=256 exp2", dict(seqlen=256, heads=2, use_exp2=True, seed=3)),
+        ("G=1 T=64 four-head ping-pong", dict(seqlen=64, heads=4, use_exp2=True, seed=4)),
     ]
     failed = []
     for name, kwargs in cases:

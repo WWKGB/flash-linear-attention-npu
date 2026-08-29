@@ -20,13 +20,6 @@ using namespace AscendC::MicroAPI;
 constexpr float CHUNK_FWD_O_LN2 = 0.69314718055994530941723212145818f;
 constexpr uint32_t CHUNK_FWD_O_UB_ALIGN = 32;
 constexpr uint32_t CHUNK_FWD_O_VEC_MASK_OFFSET = 0;
-constexpr uint32_t CHUNK_FWD_O_VEC_GATE_O_OFFSET = CHUNK_FWD_O_UB_MASK_BYTES;
-constexpr uint32_t CHUNK_FWD_O_VEC_GATE_A_OFFSET =
-    CHUNK_FWD_O_VEC_GATE_O_OFFSET + CHUNK_FWD_O_A5_BT * sizeof(float);
-constexpr uint32_t CHUNK_FWD_O_VEC_G_FP32_OFFSET =
-    CHUNK_FWD_O_VEC_GATE_A_OFFSET + CHUNK_FWD_O_A5_BT * CHUNK_FWD_O_A5_BT * sizeof(float);
-constexpr uint32_t CHUNK_FWD_O_VEC_G_INPUT_OFFSET =
-    CHUNK_FWD_O_VEC_G_FP32_OFFSET + CHUNK_FWD_O_A5_BT * sizeof(float);
 
 __simd_callee__ inline void LoadGateFloatPair(RegTensor<float> &zero, RegTensor<float> &one, __ubuf__ float *src)
 {
@@ -157,7 +150,7 @@ __simd_vf__ inline void Stage5Fuse(__ubuf__ float *oSPrimeAddr, __ubuf__ float *
 template <typename GT, bool UseExp2>
 class ChunkFwdOA5VectorProcess {
 public:
-    static constexpr bool kEnableStage3Compute = true;
+    static constexpr bool kEnableStage3Compute = false;
 
     __aicore__ inline ChunkFwdOA5VectorProcess(GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR h, GM_ADDR g,
                                                GM_ADDR cuSeqlens, GM_ADDR chunkOffsets, GM_ADDR o, GM_ADDR workspace)
@@ -172,7 +165,7 @@ public:
         pipe_ = pipe;
 
         const uint32_t bt = static_cast<uint32_t>(CHUNK_FWD_O_A5_BT);
-        pipe_->InitBuffer(ubBuf_, CHUNK_FWD_O_UB_STAGE3_END);
+        pipe_->InitBuffer(ubBuf_, CHUNK_FWD_O_UB_TOTAL_BYTES);
         mte2ToVEvent_ = pipe_->AllocEventID<HardEvent::MTE2_V>();
         vToMte3Event_ = pipe_->AllocEventID<HardEvent::V_MTE3>();
         mte3ToVEvent_ = pipe_->AllocEventID<HardEvent::MTE3_V>();
@@ -185,45 +178,67 @@ public:
         }
     }
 
-    __aicore__ inline void PrepareCubeUbForStage2()
+    __aicore__ inline void WaitStage2Ready(uint32_t headOffset)
     {
-        SetCubeUbFreeAiv();
+        Catlass::Arch::CrossCoreFlag flag{
+            static_cast<Catlass::Arch::FlagID>(CHUNK_FWD_O_CC_CUBE_READY_BASE + headOffset)};
+        Catlass::Arch::CrossCoreWaitFlag(flag);
     }
 
-    __aicore__ inline void WaitStage2Ready()
+    __aicore__ inline void SignalStage1Ready(uint32_t headOffset)
     {
-        WaitCubeUbReadyAiv();
+        Catlass::Arch::CrossCoreFlag flag{
+            static_cast<Catlass::Arch::FlagID>(CHUNK_FWD_O_S1_READY_BASE + headOffset)};
+        Catlass::Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(flag);
     }
 
-    __aicore__ inline void DumpStage2ARaw(uint32_t loopIdx, int64_t hv)
+    __aicore__ inline void ReleaseStage2Group()
     {
-        if (!ChunkFwdODumpEnabled(tiling_) || AscendC::GetSubBlockIdx() != 0) {
+        Catlass::Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(groupReleaseFlag_);
+    }
+
+    __aicore__ inline void SignalStage2Consumed(uint32_t headOffset)
+    {
+        Catlass::Arch::CrossCoreFlag flag{
+            static_cast<Catlass::Arch::FlagID>(CHUNK_FWD_O_CC_SLOT_RELEASE_BASE + headOffset)};
+        Catlass::Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(flag);
+    }
+
+    __aicore__ inline void SignalStage1GroupDone()
+    {
+        Catlass::Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(stage1GroupDoneFlag_);
+    }
+
+    __aicore__ inline void DumpStage2ARaw(uint32_t loopIdx, int64_t hv, uint32_t localSlot)
+    {
+        if (!ChunkFwdODumpEnabled(tiling_)) {
             return;
         }
         const int64_t slotIdx = ChunkFwdODumpSlotIndex(tiling_, loopIdx, hv);
         GM_ADDR slotBase = ChunkFwdODumpSlotPtr(workspace_, tiling_, slotIdx);
         LocalTensor<bfloat16_t> aRaw =
-            resource_.ubBuf.GetBufferByByte<bfloat16_t>(CHUNK_FWD_O_UB_ARAW_OFFSET);
+            resource_.ubBuf.GetBufferByByte<bfloat16_t>(ChunkFwdOARawOffset(localSlot));
         ChunkFwdODumpUbToGm(
             slotBase, CHUNK_FWD_O_DBG_ARAW_OFF, aRaw,
             CHUNK_FWD_O_A5_BT * CHUNK_FWD_O_A5_BT);
     }
 
-    __aicore__ inline void DumpStage2OSRaw(uint32_t loopIdx, int64_t hv)
+    __aicore__ inline void DumpStage2OSRaw(uint32_t loopIdx, int64_t hv, uint32_t localSlot)
     {
-        if (!ChunkFwdODumpEnabled(tiling_) || AscendC::GetSubBlockIdx() != 0) {
+        if (!ChunkFwdODumpEnabled(tiling_)) {
             return;
         }
         const int64_t slotIdx = ChunkFwdODumpSlotIndex(tiling_, loopIdx, hv);
         GM_ADDR slotBase = ChunkFwdODumpSlotPtr(workspace_, tiling_, slotIdx);
-        LocalTensor<float> oSRaw =
-            resource_.ubBuf.GetBufferByByte<float>(CHUNK_FWD_O_UB_OSRAW_OFFSET);
+        LocalTensor<bfloat16_t> oSRaw =
+            resource_.ubBuf.GetBufferByByte<bfloat16_t>(ChunkFwdOOSRawOffset(localSlot));
         ChunkFwdODumpUbToGm(
             slotBase, CHUNK_FWD_O_DBG_OSRAW_OFF, oSRaw,
             CHUNK_FWD_O_A5_BT * CHUNK_FWD_O_A5_V);
     }
 
-    __aicore__ inline void ProcessStage1(uint32_t loopIdx, const ChunkFwdOChunkLoc &loc, int64_t hk, int64_t hv)
+    __aicore__ inline void ProcessStage1(uint32_t loopIdx, const ChunkFwdOChunkLoc &loc, int64_t hk, int64_t hv,
+                                         uint32_t localSlot)
     {
         (void)loopIdx;
         (void)hk;
@@ -234,7 +249,7 @@ public:
 
         const uint32_t bt = static_cast<uint32_t>(CHUNK_FWD_O_A5_BT);
         LocalTensor<GT> gLocal =
-            ubBuf_.GetWithOffset<GT>(bt, CHUNK_FWD_O_VEC_G_INPUT_OFFSET);
+            ubBuf_.GetWithOffset<GT>(bt, CHUNK_FWD_O_UB_G_INPUT_SCRATCH_OFFSET);
         DataCopyPad(gLocal, gGm[gOffset],
                     {1, static_cast<uint32_t>(loc.chunkLen * sizeof(GT)), 0, 0, 0},
                     {false, 0, 0, 0});
@@ -242,7 +257,7 @@ public:
         WaitFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
 
         LocalTensor<float> gFp32 =
-            ubBuf_.GetWithOffset<float>(bt, CHUNK_FWD_O_VEC_G_FP32_OFFSET);
+            ubBuf_.GetWithOffset<float>(bt, CHUNK_FWD_O_UB_G_FP32_SCRATCH_OFFSET);
         if constexpr (std::is_same<GT, float>::value) {
             DataCopy(gFp32, gLocal, loc.chunkLen);
         } else {
@@ -257,13 +272,27 @@ public:
             ubBuf_.GetWithOffset<uint8_t>(bt * bt, CHUNK_FWD_O_VEC_MASK_OFFSET);
         BuildCausalMaskU8(mask, loc.chunkLen);
         LocalTensor<float> gateO =
-            ubBuf_.GetWithOffset<float>(bt, CHUNK_FWD_O_VEC_GATE_O_OFFSET);
+            ubBuf_.GetWithOffset<float>(bt, ChunkFwdOGateOOffset(localSlot));
         LocalTensor<float> gateA =
-            ubBuf_.GetWithOffset<float>(bt * bt, CHUNK_FWD_O_VEC_GATE_A_OFFSET);
+            ubBuf_.GetWithOffset<float>(bt * bt, ChunkFwdOGateAOffset(localSlot));
         AscendC::VF_CALL<Stage1Gate64VF<UseExp2>>(
             (__ubuf__ float *)gateO.GetPhyAddr(), (__ubuf__ float *)gateA.GetPhyAddr(),
             (__ubuf__ float *)gFp32.GetPhyAddr(), static_cast<uint16_t>(loc.chunkLen));
         PipeBarrier<PIPE_V>();
+        (void)loopIdx;
+        (void)mask;
+    }
+
+    __aicore__ inline void DumpStage1Result(uint32_t loopIdx, const ChunkFwdOChunkLoc &loc, int64_t hv,
+                                            uint32_t localSlot)
+    {
+        constexpr uint32_t bt = static_cast<uint32_t>(CHUNK_FWD_O_A5_BT);
+        LocalTensor<uint8_t> mask =
+            ubBuf_.GetWithOffset<uint8_t>(bt * bt, CHUNK_FWD_O_VEC_MASK_OFFSET);
+        LocalTensor<float> gateO =
+            ubBuf_.GetWithOffset<float>(bt, ChunkFwdOGateOOffset(localSlot));
+        LocalTensor<float> gateA =
+            ubBuf_.GetWithOffset<float>(bt * bt, ChunkFwdOGateAOffset(localSlot));
         DumpStage1(loc, loopIdx, hv, mask, gateO, gateA);
     }
 
@@ -282,11 +311,11 @@ public:
         constexpr uint32_t bt = static_cast<uint32_t>(CHUNK_FWD_O_A5_BT);
         constexpr uint32_t vDim = static_cast<uint32_t>(CHUNK_FWD_O_A5_V);
         LocalTensor<float> gateA =
-            ubBuf_.GetWithOffset<float>(bt * bt, CHUNK_FWD_O_VEC_GATE_A_OFFSET);
+            ubBuf_.GetWithOffset<float>(bt * bt, ChunkFwdOGateAOffset(0));
         LocalTensor<bfloat16_t> aRaw =
-            resource_.ubBuf.GetBufferByByte<bfloat16_t>(CHUNK_FWD_O_UB_ARAW_OFFSET);
+            resource_.ubBuf.GetBufferByByte<bfloat16_t>(ChunkFwdOARawOffset(0));
         LocalTensor<float> oSRaw =
-            resource_.ubBuf.GetBufferByByte<float>(CHUNK_FWD_O_UB_OSRAW_OFFSET);
+            resource_.ubBuf.GetBufferByByte<float>(ChunkFwdOOSRawOffset(0));
         LocalTensor<float> oSPrime =
             ubBuf_.GetWithOffset<float>(bt * vDim, CHUNK_FWD_O_UB_OSPRIME_OFFSET);
         LocalTensor<float> aPrimeFp32 =
@@ -308,13 +337,13 @@ public:
         // AscendC::printf("S3-04 after-mask ok\n");
 
         LocalTensor<bfloat16_t> aPrimeBf16 =
-            resource_.ubBuf.GetBufferByByte<bfloat16_t>(CHUNK_FWD_O_UB_ARAW_OFFSET);
+            resource_.ubBuf.GetBufferByByte<bfloat16_t>(ChunkFwdOARawOffset(0));
         Cast(aPrimeBf16, aPrimeFp32, RoundMode::CAST_RINT, bt * bt);
         PipeBarrier<PIPE_V>();
         // AscendC::printf("S3-05 after-cast2 ok\n");
 
         LocalTensor<float> gateO =
-            ubBuf_.GetWithOffset<float>(bt, CHUNK_FWD_O_VEC_GATE_O_OFFSET);
+            ubBuf_.GetWithOffset<float>(bt, ChunkFwdOGateOOffset(0));
         AscendC::VF_CALL<Stage3GateOS64VF>(
             reinterpret_cast<__ubuf__ float *>(oSPrime.GetPhyAddr()),
             reinterpret_cast<__ubuf__ float *>(oSRaw.GetPhyAddr()),
@@ -360,7 +389,7 @@ private:
     {
         (void)loc;
         if ASCEND_IS_AIV {
-            if (ChunkFwdODumpEnabled(tiling_) && AscendC::GetSubBlockIdx() == 0) {
+            if (ChunkFwdODumpEnabled(tiling_)) {
                 SetFlag<HardEvent::V_MTE3>(vToMte3Event_);
                 WaitFlag<HardEvent::V_MTE3>(vToMte3Event_);
                 const int64_t slotIdx = ChunkFwdODumpSlotIndex(tiling_, loopIdx, hv);
@@ -371,16 +400,6 @@ private:
                 ChunkFwdODumpUbToGm(slotBase, CHUNK_FWD_O_DBG_GATE_A_OFF, gateA, bt * bt);
             }
         }
-    }
-
-    __aicore__ inline void SetCubeUbFreeAiv()
-    {
-        CrossCoreSetFlag<0x4, PIPE_V>(CHUNK_FWD_O_CUBE_UB_FREE_FLAG);
-    }
-
-    __aicore__ inline void WaitCubeUbReadyAiv()
-    {
-        CrossCoreWaitFlag<0x4, PIPE_V>(CHUNK_FWD_O_CUBE_UB_READY_FLAG);
     }
 
     GM_ADDR q_;
@@ -400,6 +419,8 @@ private:
     TEventID vToMte3Event_ = 0;
     TEventID mte3ToVEvent_ = 0;
     Catlass::Arch::Resource<Catlass::Arch::Ascend950> resource_;
+    Catlass::Arch::CrossCoreFlag groupReleaseFlag_{CHUNK_FWD_O_VEC_TO_CUBE_RELEASE_FLAG};
+    Catlass::Arch::CrossCoreFlag stage1GroupDoneFlag_{CHUNK_FWD_O_S1_GROUP_DONE_FLAG};
 };
 
 } // namespace GDN

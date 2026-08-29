@@ -38,6 +38,7 @@ static void ChunkFwdOTilingDataPrint(gert::TilingContext *context, const ChunkFw
     OP_LOGD(nodeName, "=== useExp2: %ld", tiling.useExp2);
     OP_LOGD(nodeName, "=== chunkNum: %ld", tiling.chunkNum);
     OP_LOGD(nodeName, "=== hvPerHk: %ld", tiling.hvPerHk);
+    OP_LOGD(nodeName, "=== taskGroupSize: %ld", tiling.taskGroupSize);
     OP_LOGD(nodeName, "=== numChunksPerBatch: %ld", tiling.numChunksPerBatch);
     OP_LOGD(nodeName, "=== scale: %f", tiling.scale);
     OP_LOGD(nodeName, ">>>>>>>>>>>>>>> Print ChunkFwdO tiling data end <<<<<<<<<<<<<<<<");
