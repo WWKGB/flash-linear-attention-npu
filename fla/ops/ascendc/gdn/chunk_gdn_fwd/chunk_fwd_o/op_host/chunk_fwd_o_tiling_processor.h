@@ -327,8 +327,9 @@ public:
 
         tiling_.debugDumpOffset = static_cast<int64_t>(ctx_.sysWorkspaceSize);
         tiling_.debugDumpSlotBytes = static_cast<int64_t>(slotBytes);
-        tiling_.aPrimeWorkspaceOffset = static_cast<int64_t>(ctx_.sysWorkspaceSize + userBytes);
-        workspaceSize_ = ctx_.sysWorkspaceSize + userBytes;
+        tiling_.aPrimeWorkspaceOffset = static_cast<int64_t>(userBytes);
+        workspaceSize_ =
+            ctx_.sysWorkspaceSize + userBytes + static_cast<size_t>(GDN::CHUNK_FWD_O_APRIME_WORKSPACE_BYTES);
         return ge::GRAPH_SUCCESS;
     }
 

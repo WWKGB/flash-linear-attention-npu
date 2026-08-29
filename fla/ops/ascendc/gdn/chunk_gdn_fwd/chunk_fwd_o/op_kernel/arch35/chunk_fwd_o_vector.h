@@ -92,18 +92,55 @@ __simd_vf__ inline void Stage1Gate64VF(__ubuf__ float *gateOAddr, __ubuf__ float
     }
 }
 
-// P4 · Stage3 gate application + causal mask (stub until P4).
-__simd_vf__ inline void Stage3GateMask(__ubuf__ float *aRawAddr, __ubuf__ float *oSRawAddr,
-                                       __ubuf__ float *gateOAddr, __ubuf__ float *gateAAddr,
-                                       __ubuf__ uint8_t *maskAddr, __ubuf__ float *oSPrimeAddr, int64_t chunkLen)
+__simd_vf__ inline void Stage3LowerMask64VF(__ubuf__ float *aPrimeAddr, uint16_t validRows)
 {
-    (void)aRawAddr;
-    (void)oSRawAddr;
-    (void)gateOAddr;
-    (void)gateAAddr;
-    (void)maskAddr;
-    (void)oSPrimeAddr;
-    (void)chunkLen;
+    constexpr uint16_t kBt = static_cast<uint16_t>(CHUNK_FWD_O_A5_BT);
+    RegTensor<float> dataReg;
+    RegTensor<float> zeroReg;
+    MaskReg floatMask = CreateMask<float, MaskPattern::ALL>();
+    MaskReg lowerMask;
+    Duplicate(zeroReg, 0.0f, floatMask);
+
+    for (uint16_t row = 0; row < kBt; ++row) {
+        const uint32_t matrixOffset = static_cast<uint32_t>(row) * kBt;
+        if (row < validRows) {
+            LoadAlign(dataReg, aPrimeAddr + matrixOffset);
+            uint32_t validCount = static_cast<uint32_t>(row) + 1U;
+            lowerMask = UpdateMask<float>(validCount);
+            Select(dataReg, dataReg, zeroReg, lowerMask);
+            StoreAlign(aPrimeAddr + matrixOffset, dataReg, floatMask);
+        } else {
+            StoreAlign(aPrimeAddr + matrixOffset, zeroReg, floatMask);
+        }
+    }
+}
+
+__simd_vf__ inline void Stage3GateOS64VF(__ubuf__ float *oSPrimeAddr, __ubuf__ float *oSRawAddr,
+                                         __ubuf__ float *gateOAddr, uint16_t validRows)
+{
+    constexpr uint16_t kBt = static_cast<uint16_t>(CHUNK_FWD_O_A5_BT);
+    constexpr uint16_t kTilesPerRow = static_cast<uint16_t>(CHUNK_FWD_O_A5_V / CHUNK_FWD_O_A5_BT);
+    RegTensor<float> dataReg;
+    RegTensor<float> gateReg;
+    RegTensor<float> zeroReg;
+    MaskReg floatMask = CreateMask<float, MaskPattern::ALL>();
+    Duplicate(zeroReg, 0.0f, floatMask);
+
+    for (uint16_t row = 0; row < kBt; ++row) {
+        LoadIn<float, true>(gateReg, gateOAddr + row);
+        for (uint16_t tile = 0; tile < kTilesPerRow; ++tile) {
+            const uint32_t offset =
+                static_cast<uint32_t>(row) * CHUNK_FWD_O_A5_V +
+                static_cast<uint32_t>(tile) * CHUNK_FWD_O_A5_BT;
+            if (row < validRows) {
+                LoadAlign(dataReg, oSRawAddr + offset);
+                Mul(dataReg, dataReg, gateReg, floatMask);
+                StoreAlign(oSPrimeAddr + offset, dataReg, floatMask);
+            } else {
+                StoreAlign(oSPrimeAddr + offset, zeroReg, floatMask);
+            }
+        }
+    }
 }
 
 // P6 · Stage5 fuse (stub until P6).
@@ -120,6 +157,8 @@ __simd_vf__ inline void Stage5Fuse(__ubuf__ float *oSPrimeAddr, __ubuf__ float *
 template <typename GT, bool UseExp2>
 class ChunkFwdOA5VectorProcess {
 public:
+    static constexpr bool kEnableStage3Compute = true;
+
     __aicore__ inline ChunkFwdOA5VectorProcess(GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR h, GM_ADDR g,
                                                GM_ADDR cuSeqlens, GM_ADDR chunkOffsets, GM_ADDR o, GM_ADDR workspace)
         : q_(q), k_(k), v_(v), h_(h), g_(g), cuSeqlens_(cuSeqlens), chunkOffsets_(chunkOffsets), o_(o),
@@ -133,10 +172,10 @@ public:
         pipe_ = pipe;
 
         const uint32_t bt = static_cast<uint32_t>(CHUNK_FWD_O_A5_BT);
-        pipe_->InitBuffer(
-            ubBuf_, CHUNK_FWD_O_UB_OSRAW_OFFSET + CHUNK_FWD_O_UB_OSRAW_BYTES);
+        pipe_->InitBuffer(ubBuf_, CHUNK_FWD_O_UB_STAGE3_END);
         mte2ToVEvent_ = pipe_->AllocEventID<HardEvent::MTE2_V>();
         vToMte3Event_ = pipe_->AllocEventID<HardEvent::V_MTE3>();
+        mte3ToVEvent_ = pipe_->AllocEventID<HardEvent::MTE3_V>();
     }
 
     __aicore__ inline void ProcessInit()
@@ -230,16 +269,80 @@ public:
 
     __aicore__ inline void ProcessStage3(uint32_t loopIdx, const ChunkFwdOChunkLoc &loc, int64_t hk, int64_t hv)
     {
-        (void)loopIdx;
-        (void)loc;
         (void)hk;
         (void)hv;
         if (AscendC::GetSubBlockIdx() != 0) {
             return;
         }
-        // Serial scheduling: S2 completes before this stage via SyncAll.
-        WaitCubeUbReadyAiv();
-        SetCubeUbFreeAiv();
+        if constexpr (!kEnableStage3Compute) {
+            return;
+        }
+        // AscendC::printf("S3-00 enter loop=%u hv=%ld len=%u\n", loopIdx, hv, loc.chunkLen);
+
+        constexpr uint32_t bt = static_cast<uint32_t>(CHUNK_FWD_O_A5_BT);
+        constexpr uint32_t vDim = static_cast<uint32_t>(CHUNK_FWD_O_A5_V);
+        LocalTensor<float> gateA =
+            ubBuf_.GetWithOffset<float>(bt * bt, CHUNK_FWD_O_VEC_GATE_A_OFFSET);
+        LocalTensor<bfloat16_t> aRaw =
+            resource_.ubBuf.GetBufferByByte<bfloat16_t>(CHUNK_FWD_O_UB_ARAW_OFFSET);
+        LocalTensor<float> oSRaw =
+            resource_.ubBuf.GetBufferByByte<float>(CHUNK_FWD_O_UB_OSRAW_OFFSET);
+        LocalTensor<float> oSPrime =
+            ubBuf_.GetWithOffset<float>(bt * vDim, CHUNK_FWD_O_UB_OSPRIME_OFFSET);
+        LocalTensor<float> aPrimeFp32 =
+            ubBuf_.GetWithOffset<float>(bt * bt, CHUNK_FWD_O_UB_APRIME_FP32_OFFSET);
+        // AscendC::printf("S3-01 ub-views ok\n");
+
+        Cast(aPrimeFp32, aRaw, RoundMode::CAST_NONE, bt * bt);
+        PipeBarrier<PIPE_V>();
+        // AscendC::printf("S3-02 after-cast1 ok\n");
+
+        Mul(aPrimeFp32, aPrimeFp32, gateA, bt * bt);
+        PipeBarrier<PIPE_V>();
+        // AscendC::printf("S3-03 after-mul ok\n");
+
+        AscendC::VF_CALL<Stage3LowerMask64VF>(
+            reinterpret_cast<__ubuf__ float *>(aPrimeFp32.GetPhyAddr()),
+            static_cast<uint16_t>(loc.chunkLen));
+        PipeBarrier<PIPE_V>();
+        // AscendC::printf("S3-04 after-mask ok\n");
+
+        LocalTensor<bfloat16_t> aPrimeBf16 =
+            resource_.ubBuf.GetBufferByByte<bfloat16_t>(CHUNK_FWD_O_UB_ARAW_OFFSET);
+        Cast(aPrimeBf16, aPrimeFp32, RoundMode::CAST_RINT, bt * bt);
+        PipeBarrier<PIPE_V>();
+        // AscendC::printf("S3-05 after-cast2 ok\n");
+
+        LocalTensor<float> gateO =
+            ubBuf_.GetWithOffset<float>(bt, CHUNK_FWD_O_VEC_GATE_O_OFFSET);
+        AscendC::VF_CALL<Stage3GateOS64VF>(
+            reinterpret_cast<__ubuf__ float *>(oSPrime.GetPhyAddr()),
+            reinterpret_cast<__ubuf__ float *>(oSRaw.GetPhyAddr()),
+            reinterpret_cast<__ubuf__ float *>(gateO.GetPhyAddr()),
+            static_cast<uint16_t>(loc.chunkLen));
+        PipeBarrier<PIPE_V>();
+
+        SetFlag<HardEvent::V_MTE3>(vToMte3Event_);
+        WaitFlag<HardEvent::V_MTE3>(vToMte3Event_);
+        const int64_t laSlot = ChunkFwdOLaSlot(static_cast<int64_t>(loopIdx));
+        GM_ADDR aPrimeAddr = workspace_ + tiling_.aPrimeWorkspaceOffset +
+                             laSlot * CHUNK_FWD_O_APRIME_SLOT_BYTES;
+        GlobalTensor<bfloat16_t> aPrimeGm;
+        aPrimeGm.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(aPrimeAddr));
+        DataCopyExtParams aPrimeCopyParams{
+            1, CHUNK_FWD_O_APRIME_SLOT_BYTES, 0, 0, 0};
+        DataCopyPad(aPrimeGm, aPrimeBf16, aPrimeCopyParams);
+
+        if (ChunkFwdODumpEnabled(tiling_)) {
+            const int64_t slotIdx = ChunkFwdODumpSlotIndex(tiling_, loopIdx, hv);
+            GM_ADDR slotBase = ChunkFwdODumpSlotPtr(workspace_, tiling_, slotIdx);
+            ChunkFwdODumpUbToGm(
+                slotBase, CHUNK_FWD_O_DBG_APRIME_OFF, aPrimeBf16, bt * bt);
+            ChunkFwdODumpUbToGm(
+                slotBase, CHUNK_FWD_O_DBG_OSPRIME_OFF, oSPrime, bt * vDim);
+        }
+        SetFlag<HardEvent::MTE3_V>(mte3ToVEvent_);
+        WaitFlag<HardEvent::MTE3_V>(mte3ToVEvent_);
     }
 
     __aicore__ inline void ProcessStage5(uint32_t loopIdx, const ChunkFwdOChunkLoc &loc, int64_t hk, int64_t hv)
@@ -295,6 +398,7 @@ private:
     TBuf<TPosition::VECCALC> ubBuf_;
     TEventID mte2ToVEvent_ = 0;
     TEventID vToMte3Event_ = 0;
+    TEventID mte3ToVEvent_ = 0;
     Catlass::Arch::Resource<Catlass::Arch::Ascend950> resource_;
 };
 

@@ -86,6 +86,7 @@ private:
                     vector.WaitStage2Ready();
                     vector.DumpStage2ARaw(loopIdx, hv);
                     vector.DumpStage2OSRaw(loopIdx, hv);
+                    vector.ProcessStage3(loopIdx, loc, hk, hv);
                 }
             }
         }

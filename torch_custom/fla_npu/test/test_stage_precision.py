@@ -41,12 +41,16 @@ DBG_GATE_O_BYTES = BT * 4
 DBG_GATE_A_BYTES = BT * BT * 4
 DBG_ARAW_BYTES = BT * BT * 2
 DBG_OSRAW_BYTES = BT * V * 4
+DBG_APRIME_BYTES = BT * BT * 2
+DBG_OSPRIME_BYTES = BT * V * 4
 DBG_MASK_OFF = 0
 DBG_GATE_O_OFF = DBG_MASK_BYTES
 DBG_GATE_A_OFF = DBG_GATE_O_OFF + DBG_GATE_O_BYTES
 DBG_ARAW_OFF = DBG_GATE_A_OFF + DBG_GATE_A_BYTES
 DBG_OSRAW_OFF = DBG_ARAW_OFF + DBG_ARAW_BYTES
-DBG_SLOT_BYTES = ((DBG_OSRAW_OFF + DBG_OSRAW_BYTES + 511) // 512) * 512
+DBG_APRIME_OFF = DBG_OSRAW_OFF + DBG_OSRAW_BYTES
+DBG_OSPRIME_OFF = DBG_APRIME_OFF + DBG_APRIME_BYTES
+DBG_SLOT_BYTES = ((DBG_OSPRIME_OFF + DBG_OSPRIME_BYTES + 511) // 512) * 512
 
 
 def _call_chunk_fwd_o_with_workspace(q, k, v, h, g, scale, *, cu_seqlens, chunk_indices, chunk_size=64):
@@ -151,7 +155,28 @@ def _read_slot(user_ws: np.ndarray, slot_idx: int, slot_bytes: int) -> dict:
         .reshape(BT, V)
         .copy()
     )
-    return {"mask": mask, "gate_o": gate_o, "gate_A": gate_a, "A_raw": a_raw, "O_s_raw": o_s_raw}
+    a_prime = (
+        chunk[DBG_APRIME_OFF : DBG_APRIME_OFF + DBG_APRIME_BYTES]
+        .view(ml_dtypes.bfloat16)
+        .astype(np.float32)
+        .reshape(BT, BT)
+        .copy()
+    )
+    o_s_prime = (
+        chunk[DBG_OSPRIME_OFF : DBG_OSPRIME_OFF + DBG_OSPRIME_BYTES]
+        .view(np.float32)
+        .reshape(BT, V)
+        .copy()
+    )
+    return {
+        "mask": mask,
+        "gate_o": gate_o,
+        "gate_A": gate_a,
+        "A_raw": a_raw,
+        "O_s_raw": o_s_raw,
+        "A_prime": a_prime,
+        "O_s_prime": o_s_prime,
+    }
 
 
 def _cpu_stage_refs(q, k, h, g, chunk_len: int, *, use_exp2: bool = False):
@@ -178,6 +203,9 @@ def _cpu_stage_refs(q, k, h, g, chunk_len: int, *, use_exp2: bool = False):
     h_bf = h.to(torch.bfloat16)
     a_raw = (q_bf @ k_bf.T).float().numpy()
     o_s_raw = (q_bf @ h_bf).float().numpy()
+    a_prime_fp32 = torch.from_numpy(a_raw) * gate_a * torch.from_numpy(mask).float()
+    a_prime = a_prime_fp32.to(torch.bfloat16).float().numpy()
+    o_s_prime = torch.from_numpy(o_s_raw) * gate_o.unsqueeze(1)
 
     return {
         "mask": mask,
@@ -185,6 +213,8 @@ def _cpu_stage_refs(q, k, h, g, chunk_len: int, *, use_exp2: bool = False):
         "gate_A": gate_a.numpy(),
         "A_raw": a_raw,
         "O_s_raw": o_s_raw,
+        "A_prime": a_prime,
+        "O_s_prime": o_s_prime.numpy(),
     }
 
 
@@ -283,6 +313,20 @@ def run_case(*, seqlen=64, use_exp2: bool = False, seed: int = 0):
         "O_s_raw",
         ref["O_s_raw"][:chunk_len],
         dump["O_s_raw"][:chunk_len],
+        atol=0.05,
+        rtol=0.01,
+    )
+    ok &= _compare(
+        "A_prime",
+        ref["A_prime"][:chunk_len, :chunk_len],
+        dump["A_prime"][:chunk_len, :chunk_len],
+        atol=0.05,
+        rtol=0.01,
+    )
+    ok &= _compare(
+        "O_s_prime",
+        ref["O_s_prime"][:chunk_len],
+        dump["O_s_prime"][:chunk_len],
         atol=0.05,
         rtol=0.01,
     )
