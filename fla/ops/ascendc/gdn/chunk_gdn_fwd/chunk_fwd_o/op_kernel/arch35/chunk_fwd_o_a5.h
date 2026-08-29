@@ -84,7 +84,8 @@ private:
                 if (owns && kEnableStage2) {
                     vector.PrepareCubeUbForStage2();
                     vector.WaitStage2Ready();
-                    vector.DumpStage2Slice(loopIdx, hv);
+                    vector.DumpStage2ARaw(loopIdx, hv);
+                    vector.DumpStage2OSRaw(loopIdx, hv);
                 }
             }
         }

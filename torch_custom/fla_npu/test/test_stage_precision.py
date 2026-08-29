@@ -40,7 +40,7 @@ DBG_MASK_BYTES = 4 * 1024
 DBG_GATE_O_BYTES = BT * 4
 DBG_GATE_A_BYTES = BT * BT * 4
 DBG_ARAW_BYTES = BT * BT * 2
-DBG_OSRAW_BYTES = BT * V * 2
+DBG_OSRAW_BYTES = BT * V * 4
 DBG_MASK_OFF = 0
 DBG_GATE_O_OFF = DBG_MASK_BYTES
 DBG_GATE_A_OFF = DBG_GATE_O_OFF + DBG_GATE_O_BYTES
@@ -147,8 +147,7 @@ def _read_slot(user_ws: np.ndarray, slot_idx: int, slot_bytes: int) -> dict:
     )
     o_s_raw = (
         chunk[DBG_OSRAW_OFF : DBG_OSRAW_OFF + DBG_OSRAW_BYTES]
-        .view(ml_dtypes.bfloat16)
-        .astype(np.float32)
+        .view(np.float32)
         .reshape(BT, V)
         .copy()
     )
@@ -273,8 +272,20 @@ def run_case(*, seqlen=64, use_exp2: bool = False, seed: int = 0):
     ok &= _compare("mask", ref["mask"], dump["mask"], atol=0, rtol=0)
     ok &= _compare("gate_o", ref["gate_o"], dump["gate_o"], atol=1e-3, rtol=1e-2)
     ok &= _compare("gate_A", ref["gate_A"], dump["gate_A"], atol=1e-2, rtol=1e-2)
-    ok &= _compare("A_raw", ref["A_raw"], dump["A_raw"], atol=0.05, rtol=0.01)
-    ok &= _compare("O_s_raw", ref["O_s_raw"], dump["O_s_raw"], atol=0.05, rtol=0.01)
+    ok &= _compare(
+        "A_raw",
+        ref["A_raw"][:chunk_len, :chunk_len],
+        dump["A_raw"][:chunk_len, :chunk_len],
+        atol=0.05,
+        rtol=0.01,
+    )
+    ok &= _compare(
+        "O_s_raw",
+        ref["O_s_raw"][:chunk_len],
+        dump["O_s_raw"][:chunk_len],
+        atol=0.05,
+        rtol=0.01,
+    )
     return ok
 
 

@@ -40,7 +40,7 @@ public:
         ArchTag, Element, LayoutRM, Element, LayoutCM, Element, LayoutRM, void,
         Catlass::Gemm::Tile::CopyL0CToUBMode::NO_SPLIT>;
     using DirectTileCopyRM = Common::Tile::PackedTileCopyTlaToUB<
-        ArchTag, Element, LayoutRM, Element, LayoutRM, Element, LayoutRM, void,
+        ArchTag, Element, LayoutRM, Element, LayoutRM, float, LayoutRM, void,
         Catlass::Gemm::Tile::CopyL0CToUBMode::NO_SPLIT>;
 
     static constexpr uint32_t kBt = static_cast<uint32_t>(CHUNK_FWD_O_A5_BT);
@@ -86,12 +86,14 @@ public:
         const int64_t qOffset = ChunkFwdOQKOffset(tiling_, loc, hk);
         const int64_t kOffset = ChunkFwdOQKOffset(tiling_, loc, hk);
         const int64_t hOffset = ChunkFwdOHOffset(tiling_, loc, hv);
-        WaitCubeUbFreeAic();
+
+        WaitCubeUbFreeAic(CHUNK_FWD_O_CUBE_UB_FREE_FLAG);
         LoadQKToL1(qOffset, kOffset, m);
         ComputeQKTToUb(m);
         LoadHToL1(hOffset, m);
         ComputeQHToUb(m);
-        SetCubeUbReadyAic();
+        PublishStage2Outputs(m);
+        SetCubeUbReadyAic(CHUNK_FWD_O_CUBE_UB_READY_FLAG);
     }
 
     __aicore__ inline void ProcessStage4(uint32_t loopIdx, const ChunkFwdOChunkLoc &loc, int64_t hk, int64_t hv)
@@ -103,25 +105,25 @@ public:
     }
 
 private:
-    __aicore__ inline void WaitCubeUbFreeAic()
+    __aicore__ inline void WaitCubeUbFreeAic(uint64_t flag)
     {
-        AscendC::CrossCoreWaitFlag<0x4, PIPE_FIX>(CHUNK_FWD_O_CUBE_UB_FREE_FLAG);
+        AscendC::CrossCoreWaitFlag<0x4, PIPE_FIX>(flag);
         AscendC::CrossCoreWaitFlag<0x4, PIPE_FIX>(
-            CHUNK_FWD_O_CUBE_UB_FREE_FLAG + CHUNK_FWD_O_SUBBLOCK_FLAG_STRIDE);
+            flag + CHUNK_FWD_O_SUBBLOCK_FLAG_STRIDE);
     }
 
-    __aicore__ inline void SetCubeUbReadyAic()
+    __aicore__ inline void SetCubeUbReadyAic(uint64_t flag)
     {
-        AscendC::CrossCoreSetFlag<0x4, PIPE_FIX>(CHUNK_FWD_O_CUBE_UB_READY_FLAG);
+        AscendC::CrossCoreSetFlag<0x4, PIPE_FIX>(flag);
         AscendC::CrossCoreSetFlag<0x4, PIPE_FIX>(
-            CHUNK_FWD_O_CUBE_UB_READY_FLAG + CHUNK_FWD_O_SUBBLOCK_FLAG_STRIDE);
+            flag + CHUNK_FWD_O_SUBBLOCK_FLAG_STRIDE);
     }
 
-    template <typename DirectTileCopy, typename TensorL0C>
+    template <typename DstElement, typename DirectTileCopy, typename TensorL0C>
     __aicore__ inline void PublishDirectTile(TensorL0C &tensorL0C, uint32_t m, uint32_t n)
     {
-        auto layoutUb = tla::MakeLayout<Element, LayoutRM>(m, n);
-        auto tensorUb = tla::MakeTensor(resource_.ubBuf.template GetBufferByByte<Element>(directUbOffset_),
+        auto layoutUb = tla::MakeLayout<DstElement, LayoutRM>(m, n);
+        auto tensorUb = tla::MakeTensor(resource_.ubBuf.template GetBufferByByte<DstElement>(directUbOffset_),
                                         layoutUb, Catlass::Arch::PositionUB{});
         using CopyL0CToDst = typename DirectTileCopy::template CopyL0CToDst<decltype(tensorUb)>;
         CopyL0CToDst copyL0CToDst;
@@ -131,6 +133,24 @@ private:
         copyL0CToDst(tensorUb, tensorL0C);
         SetFlag<HardEvent::FIX_M>(kEventFixM);
         WaitFlag<HardEvent::FIX_M>(kEventFixM);
+    }
+
+    __aicore__ inline void PublishStage2Outputs(uint32_t m)
+    {
+        LocalTensor<float> qktL0C = resource_.l0CBuf.template GetBufferByByte<float>(0);
+        auto qktLayout = tla::MakeLayoutL0C(m, m);
+        auto qktTensor = tla::MakeTensor(qktL0C, qktLayout, Catlass::Arch::PositionL0C{});
+        auto qktTile = GetTile(qktTensor, tla::MakeCoord(0, 0), tla::MakeShape(m, m));
+        directUbOffset_ = CHUNK_FWD_O_UB_ARAW_OFFSET;
+        PublishDirectTile<Element, DirectTileCopyCC>(qktTile, m, m);
+
+        LocalTensor<float> qhL0C =
+            resource_.l0CBuf.template GetBufferByByte<float>(CHUNK_FWD_O_L0C_QH_OFFSET);
+        auto qhLayout = tla::MakeLayoutL0C(m, kV);
+        auto qhTensor = tla::MakeTensor(qhL0C, qhLayout, Catlass::Arch::PositionL0C{});
+        auto qhTile = GetTile(qhTensor, tla::MakeCoord(0, 0), tla::MakeShape(m, kV));
+        directUbOffset_ = CHUNK_FWD_O_UB_OSRAW_OFFSET;
+        PublishDirectTile<float, DirectTileCopyRM>(qhTile, m, kV);
     }
 
     __aicore__ inline void LoadQKToL1(int64_t qOffset, int64_t kOffset, uint32_t m)
@@ -227,8 +247,6 @@ private:
         tileMmad(tileL0C, tileL0A, tileL0B, m, m, kK, true, 0);
         SetFlag<HardEvent::M_MTE1>(kEventL0Free);
 
-        directUbOffset_ = CHUNK_FWD_O_UB_ARAW_OFFSET;
-        PublishDirectTile<DirectTileCopyCC>(tileL0C, m, m);
     }
 
     __aicore__ inline void ComputeQHToUb(uint32_t m)
@@ -245,7 +263,8 @@ private:
         LocalTensor<Element> l1H = resource_.l1Buf.template GetBufferByByte<Element>(CHUNK_FWD_O_L1_H_OFFSET);
         LocalTensor<Element> l0A = resource_.l0ABuf.template GetBufferByByte<Element>(0);
         LocalTensor<Element> l0B = resource_.l0BBuf.template GetBufferByByte<Element>(0);
-        LocalTensor<float> l0C = resource_.l0CBuf.template GetBufferByByte<float>(0);
+        LocalTensor<float> l0C =
+            resource_.l0CBuf.template GetBufferByByte<float>(CHUNK_FWD_O_L0C_QH_OFFSET);
 
         auto layoutL1Q = tla::MakeLayout<Element, LayoutTagL1A>(m, kK);
         auto layoutL1H = tla::MakeLayout<Element, LayoutTagL1B>(kK, kV);
@@ -274,10 +293,9 @@ private:
         SetFlag<HardEvent::MTE1_M>(kEventMte1M);
         WaitFlag<HardEvent::MTE1_M>(kEventMte1M);
         tileMmad(tileL0C, tileL0A, tileL0B, m, kV, kK, true, 0);
+        PipeBarrier<PIPE_M>();
         SetFlag<HardEvent::M_MTE1>(kEventL0Free);
 
-        directUbOffset_ = CHUNK_FWD_O_UB_OSRAW_OFFSET;
-        PublishDirectTile<DirectTileCopyRM>(tileL0C, m, kV);
     }
 
     __aicore__ inline void DumpStage2(uint32_t loopIdx, int64_t hv, uint32_t m)

@@ -156,28 +156,32 @@ public:
         WaitCubeUbReadyAiv();
     }
 
-    __aicore__ inline void DumpStage2Slice(uint32_t loopIdx, int64_t hv)
+    __aicore__ inline void DumpStage2ARaw(uint32_t loopIdx, int64_t hv)
     {
-        if (!ChunkFwdODumpEnabled(tiling_)) {
+        if (!ChunkFwdODumpEnabled(tiling_) || AscendC::GetSubBlockIdx() != 0) {
             return;
         }
-        constexpr uint32_t rowsPerSubBlock = CHUNK_FWD_O_A5_BT / 2;
-        const uint32_t subBlockIdx = AscendC::GetSubBlockIdx();
         const int64_t slotIdx = ChunkFwdODumpSlotIndex(tiling_, loopIdx, hv);
         GM_ADDR slotBase = ChunkFwdODumpSlotPtr(workspace_, tiling_, slotIdx);
-
         LocalTensor<bfloat16_t> aRaw =
             resource_.ubBuf.GetBufferByByte<bfloat16_t>(CHUNK_FWD_O_UB_ARAW_OFFSET);
-        LocalTensor<bfloat16_t> oSRaw =
-            resource_.ubBuf.GetBufferByByte<bfloat16_t>(CHUNK_FWD_O_UB_OSRAW_OFFSET);
-        const uint32_t aRowBytes = CHUNK_FWD_O_A5_BT * sizeof(bfloat16_t);
-        const uint32_t oRowBytes = CHUNK_FWD_O_A5_V * sizeof(bfloat16_t);
         ChunkFwdODumpUbToGm(
-            slotBase, CHUNK_FWD_O_DBG_ARAW_OFF + subBlockIdx * rowsPerSubBlock * aRowBytes,
-            aRaw, rowsPerSubBlock * CHUNK_FWD_O_A5_BT);
+            slotBase, CHUNK_FWD_O_DBG_ARAW_OFF, aRaw,
+            CHUNK_FWD_O_A5_BT * CHUNK_FWD_O_A5_BT);
+    }
+
+    __aicore__ inline void DumpStage2OSRaw(uint32_t loopIdx, int64_t hv)
+    {
+        if (!ChunkFwdODumpEnabled(tiling_) || AscendC::GetSubBlockIdx() != 0) {
+            return;
+        }
+        const int64_t slotIdx = ChunkFwdODumpSlotIndex(tiling_, loopIdx, hv);
+        GM_ADDR slotBase = ChunkFwdODumpSlotPtr(workspace_, tiling_, slotIdx);
+        LocalTensor<float> oSRaw =
+            resource_.ubBuf.GetBufferByByte<float>(CHUNK_FWD_O_UB_OSRAW_OFFSET);
         ChunkFwdODumpUbToGm(
-            slotBase, CHUNK_FWD_O_DBG_OSRAW_OFF + subBlockIdx * rowsPerSubBlock * oRowBytes,
-            oSRaw, rowsPerSubBlock * CHUNK_FWD_O_A5_V);
+            slotBase, CHUNK_FWD_O_DBG_OSRAW_OFF, oSRaw,
+            CHUNK_FWD_O_A5_BT * CHUNK_FWD_O_A5_V);
     }
 
     __aicore__ inline void ProcessStage1(uint32_t loopIdx, const ChunkFwdOChunkLoc &loc, int64_t hk, int64_t hv)

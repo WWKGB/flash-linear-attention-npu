@@ -23,7 +23,7 @@ constexpr uint32_t CHUNK_FWD_O_UB_MASK_BYTES = 4U * 1024U;
 constexpr uint32_t CHUNK_FWD_O_UB_GATE_BYTES = 64U * 1024U;
 constexpr uint32_t CHUNK_FWD_O_UB_CUBE_BASE = 68U * 1024U;
 constexpr uint32_t CHUNK_FWD_O_UB_ARAW_BYTES = 8U * 1024U;   // 64x64 bf16
-constexpr uint32_t CHUNK_FWD_O_UB_OSRAW_BYTES = 16U * 1024U; // 64x128 bf16
+constexpr uint32_t CHUNK_FWD_O_UB_OSRAW_BYTES = 32U * 1024U; // 64x128 fp32
 constexpr uint32_t CHUNK_FWD_O_UB_ARAW_OFFSET = CHUNK_FWD_O_UB_CUBE_BASE;
 constexpr uint32_t CHUNK_FWD_O_UB_OSRAW_OFFSET = CHUNK_FWD_O_UB_ARAW_OFFSET + CHUNK_FWD_O_UB_ARAW_BYTES;
 
@@ -31,6 +31,7 @@ constexpr uint32_t CHUNK_FWD_O_UB_OSRAW_OFFSET = CHUNK_FWD_O_UB_ARAW_OFFSET + CH
 constexpr uint32_t CHUNK_FWD_O_L1_Q_OFFSET = 0U;
 constexpr uint32_t CHUNK_FWD_O_L1_K_OFFSET = 16U * 1024U;
 constexpr uint32_t CHUNK_FWD_O_L1_H_OFFSET = 32U * 1024U;
+constexpr uint32_t CHUNK_FWD_O_L0C_QH_OFFSET = 16U * 1024U;
 
 // FixPipe -> UB handshake (mode 0x4, one AIC + two AIV subblocks).
 // Use non-zero flag IDs (same band as chunk_kda_fwd_fwd_h direct UB: 6/7).

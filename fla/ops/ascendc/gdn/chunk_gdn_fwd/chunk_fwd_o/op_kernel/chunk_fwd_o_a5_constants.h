@@ -27,7 +27,7 @@ constexpr uint32_t CHUNK_FWD_O_DBG_GATE_A_BYTES =
 constexpr uint32_t CHUNK_FWD_O_DBG_ARAW_BYTES =
     static_cast<uint32_t>(CHUNK_FWD_O_A5_BT * CHUNK_FWD_O_A5_BT * 2U); // bf16
 constexpr uint32_t CHUNK_FWD_O_DBG_OSRAW_BYTES =
-    static_cast<uint32_t>(CHUNK_FWD_O_A5_BT * CHUNK_FWD_O_A5_V * 2U); // bf16
+    static_cast<uint32_t>(CHUNK_FWD_O_A5_BT * CHUNK_FWD_O_A5_V * sizeof(float)); // fp32
 constexpr uint32_t CHUNK_FWD_O_DBG_MASK_OFF = 0U;
 constexpr uint32_t CHUNK_FWD_O_DBG_GATE_O_OFF = CHUNK_FWD_O_DBG_MASK_BYTES;
 constexpr uint32_t CHUNK_FWD_O_DBG_GATE_A_OFF = CHUNK_FWD_O_DBG_GATE_O_OFF + CHUNK_FWD_O_DBG_GATE_O_BYTES;
