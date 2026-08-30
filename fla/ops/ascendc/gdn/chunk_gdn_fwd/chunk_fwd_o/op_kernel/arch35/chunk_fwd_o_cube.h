@@ -37,10 +37,10 @@ public:
     using TileCopyQH = Catlass::Gemm::Tile::PackedTileCopyTla<ArchTag, Element, LayoutRM, Element, LayoutCM, Element,
                                                               LayoutRM>;
     using DirectTileCopyCC = Common::Tile::PackedTileCopyTlaToUB<
-        ArchTag, Element, LayoutRM, Element, LayoutCM, Element, LayoutRM, void,
+        ArchTag, Element, LayoutRM, Element, LayoutCM, float, LayoutRM, void,
         Catlass::Gemm::Tile::CopyL0CToUBMode::NO_SPLIT>;
     using DirectTileCopyRM = Common::Tile::PackedTileCopyTlaToUB<
-        ArchTag, Element, LayoutRM, Element, LayoutCM, Element, LayoutRM>;
+        ArchTag, Element, LayoutRM, Element, LayoutCM, float, LayoutRM>;
 
     static constexpr uint32_t kBt = static_cast<uint32_t>(CHUNK_FWD_O_A5_BT);
     static constexpr uint32_t kK = static_cast<uint32_t>(CHUNK_FWD_O_A5_K);
@@ -158,7 +158,7 @@ private:
         auto qktLayout = tla::MakeLayoutL0C(m, m);
         auto qktTensor = tla::MakeTensor(qktL0C, qktLayout, Catlass::Arch::PositionL0C{});
         auto qktTile = GetTile(qktTensor, tla::MakeCoord(0, 0), tla::MakeShape(m, m));
-        PublishDirectTile<Element, DirectTileCopyCC>(
+        PublishDirectTile<float, DirectTileCopyCC>(
             qktTile, m, m, ChunkFwdOARawOffset(localSlot), ownerSubBlock, l0CEvent);
     }
 
@@ -170,7 +170,7 @@ private:
         auto qhLayout = tla::MakeLayoutL0C(m, kV);
         auto qhTensor = tla::MakeTensor(qhL0C, qhLayout, Catlass::Arch::PositionL0C{});
         auto qhTile = GetTile(qhTensor, tla::MakeCoord(0, 0), tla::MakeShape(m, kV));
-        PublishDirectTile<Element, DirectTileCopyRM>(
+        PublishDirectTile<float, DirectTileCopyRM>(
             qhTile, m, kV, ChunkFwdOOSRawOffset(localSlot), ownerSubBlock, l0CEvent);
     }
 
@@ -189,8 +189,8 @@ private:
         using CopyGmToL1Q = typename TileCopyQK::template CopyGmToL1A<decltype(blockQ)>;
         using CopyGmToL1K = typename TileCopyQK::template CopyGmToL1B<decltype(blockK)>;
 
-        LocalTensor<Element> l1Q = resource_.l1Buf.template GetBufferByByte<Element>(CHUNK_FWD_O_L1_Q_OFFSET);
-        LocalTensor<Element> l1K = resource_.l1Buf.template GetBufferByByte<Element>(CHUNK_FWD_O_L1_K_OFFSET);
+        LocalTensor<Element> l1Q = resource_.l1Buf.template GetBufferByByte<Element>(ChunkFwdOL1QOffset(0));
+        LocalTensor<Element> l1K = resource_.l1Buf.template GetBufferByByte<Element>(ChunkFwdOL1KOffset(0));
         auto layoutL1Q = tla::MakeLayout<Element, LayoutTagL1Q>(m, kK);
         auto layoutL1K = tla::MakeLayout<Element, LayoutTagL1K>(kK, m);
         auto tensorL1Q = tla::MakeTensor(l1Q, layoutL1Q, Catlass::Arch::PositionL1{});
@@ -214,7 +214,7 @@ private:
 
         using CopyGmToL1H = typename TileCopyQH::template CopyGmToL1B<decltype(blockH)>;
 
-        LocalTensor<Element> l1H = resource_.l1Buf.template GetBufferByByte<Element>(CHUNK_FWD_O_L1_H_OFFSET);
+        LocalTensor<Element> l1H = resource_.l1Buf.template GetBufferByByte<Element>(ChunkFwdOL1HOffset(0));
         auto layoutL1H = tla::MakeLayout<Element, LayoutTagL1B>(kK, kV);
         auto tensorL1H = tla::MakeTensor(l1H, layoutL1H, Catlass::Arch::PositionL1{});
 
@@ -234,8 +234,8 @@ private:
         using CopyL1ToL0B = typename TileCopyQK::CopyL1ToL0B;
         using TileMmad = Catlass::Gemm::Tile::TileMmadTla<ArchTag, Element, LayoutTagL1A>;
 
-        LocalTensor<Element> l1Q = resource_.l1Buf.template GetBufferByByte<Element>(CHUNK_FWD_O_L1_Q_OFFSET);
-        LocalTensor<Element> l1K = resource_.l1Buf.template GetBufferByByte<Element>(CHUNK_FWD_O_L1_K_OFFSET);
+        LocalTensor<Element> l1Q = resource_.l1Buf.template GetBufferByByte<Element>(ChunkFwdOL1QOffset(0));
+        LocalTensor<Element> l1K = resource_.l1Buf.template GetBufferByByte<Element>(ChunkFwdOL1KOffset(0));
         LocalTensor<Element> l0A = resource_.l0ABuf.template GetBufferByByte<Element>(0);
         LocalTensor<Element> l0B = resource_.l0BBuf.template GetBufferByByte<Element>(0);
         LocalTensor<float> l0C = resource_.l0CBuf.template GetBufferByByte<float>(0);
@@ -284,8 +284,8 @@ private:
         using CopyL1ToL0B = typename TileCopyQH::CopyL1ToL0B;
         using TileMmad = Catlass::Gemm::Tile::TileMmadTla<ArchTag, Element, LayoutTagL1A>;
 
-        LocalTensor<Element> l1Q = resource_.l1Buf.template GetBufferByByte<Element>(CHUNK_FWD_O_L1_Q_OFFSET);
-        LocalTensor<Element> l1H = resource_.l1Buf.template GetBufferByByte<Element>(CHUNK_FWD_O_L1_H_OFFSET);
+        LocalTensor<Element> l1Q = resource_.l1Buf.template GetBufferByByte<Element>(ChunkFwdOL1QOffset(0));
+        LocalTensor<Element> l1H = resource_.l1Buf.template GetBufferByByte<Element>(ChunkFwdOL1HOffset(0));
         LocalTensor<Element> l0A =
             resource_.l0ABuf.template GetBufferByByte<Element>(CHUNK_FWD_O_L0AB_QH_OFFSET);
         LocalTensor<Element> l0B =
@@ -334,10 +334,10 @@ private:
             if (ChunkFwdODumpEnabled(tiling_)) {
                 const int64_t slotIdx = ChunkFwdODumpSlotIndex(tiling_, loopIdx, hv);
                 GM_ADDR slotBase = ChunkFwdODumpSlotPtr(workspace_, tiling_, slotIdx);
-                LocalTensor<Element> aRaw =
-                    resource_.ubBuf.template GetBufferByByte<Element>(CHUNK_FWD_O_UB_ARAW_OFFSET);
-                LocalTensor<Element> oSRaw =
-                    resource_.ubBuf.template GetBufferByByte<Element>(CHUNK_FWD_O_UB_OSRAW_OFFSET);
+                LocalTensor<float> aRaw =
+                    resource_.ubBuf.template GetBufferByByte<float>(ChunkFwdOARawOffset(0));
+                LocalTensor<float> oSRaw =
+                    resource_.ubBuf.template GetBufferByByte<float>(ChunkFwdOOSRawOffset(0));
                 ChunkFwdODumpUbToGm(slotBase, CHUNK_FWD_O_DBG_ARAW_OFF, aRaw, m * m);
                 ChunkFwdODumpUbToGm(slotBase, CHUNK_FWD_O_DBG_OSRAW_OFF, oSRaw, m * kV);
             }

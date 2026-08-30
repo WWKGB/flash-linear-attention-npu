@@ -3,8 +3,12 @@
  * BSD 3-Clause License.
  *
  * A5 L1<->UB chunk_fwd_o path.
- * Bring-up scheduler: run only Stage1 and Stage2 with a paired AIC/AIV
- * direct-UB handshake. Later stages stay disabled until these two run.
+ *
+ * Bring-up status (WIP):
+ * - Stage1: UB layout §5.3 + streamSlot prefetch/compute aligned (ProcessStage1Group).
+ * - Stage2: streamSlot ping-pong wiring pending; enable after S1/S2 handshake validated.
+ * - Stage3/4/5: not started.
+ * - Risk: kernel may hang at synchronize until Stage2 streamSlot is fully integrated.
  */
 
 #ifndef CHUNK_FWD_O_ARCH35_A5_H
@@ -21,7 +25,8 @@ namespace GDN {
 template <typename GT, bool UseExp2>
 class ChunkFwdOA5 {
 public:
-    static constexpr bool kEnableStage2 = true;
+    static constexpr bool kEnableStage1 = false;
+    static constexpr bool kEnableStage2 = false;
     static constexpr bool kEnableStage3 = false;
 
     __aicore__ inline void Init(GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR h, GM_ADDR g, GM_ADDR cuSeqlens,
@@ -44,7 +49,7 @@ public:
     {
         const uint32_t aicCoreIdx = AscendC::GetBlockIdx();
         const uint32_t aicCoreNum = AscendC::GetBlockNum();
-        const uint32_t aivCoreIdx = AscendC::GetBlockIdx() / 2U;
+        const uint32_t aivCoreIdx = AscendC::GetBlockIdx() / AscendC::GetSubBlockNum();
         const uint32_t aivCoreNum = AscendC::GetBlockNum();
 
         if ASCEND_IS_AIV {
@@ -55,7 +60,9 @@ public:
             if (AscendC::GetSubBlockIdx() == 0) {
                 vector.ProcessInit();
             }
-            RunStage1Aiv(vector, aivCoreIdx, aivCoreNum);
+            if constexpr (kEnableStage1) {
+                RunStage1Aiv(vector, aivCoreIdx, aivCoreNum);
+            }
             return;
         }
 
@@ -83,18 +90,7 @@ private:
             for (int64_t hvBase = 0; hvBase < tiling_.vNumHead; hvBase += tiling_.taskGroupSize) {
                 const int64_t remaining = tiling_.vNumHead - hvBase;
                 const int64_t taskCount = remaining < tiling_.taskGroupSize ? remaining : tiling_.taskGroupSize;
-                // Stage1 producer loop: both subblocks publish a per-head
-                // mode=0x2 participation signal; only the owner computes.
-                for (int64_t headOffset = 0; headOffset < taskCount; ++headOffset) {
-                    const uint32_t ownerSubBlock = static_cast<uint32_t>(headOffset % 2);
-                    const uint32_t localSlot = static_cast<uint32_t>(headOffset / 2);
-                    const int64_t hv = hvBase + headOffset;
-                    if (ownerSubBlock == subBlockIdx) {
-                        const int64_t hk = hv / tiling_.hvPerHk;
-                        vector.ProcessStage1(loopIdx, loc, hk, hv, localSlot);
-                    }
-                    vector.SignalStage1Ready(static_cast<uint32_t>(headOffset));
-                }
+                vector.ProcessStage1Group(loopIdx, loc, hvBase, taskCount, subBlockIdx);
                 vector.SignalStage1GroupDone();
                 // Stage2 consumer loop: per-head IDs allow AIC Stage2(head N)
                 // to overlap AIV Stage1(head N+1) without flag reuse.
