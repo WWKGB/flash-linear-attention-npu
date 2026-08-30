@@ -19,6 +19,12 @@ using namespace AscendC;
 using namespace AscendC::MicroAPI;
 
 constexpr float CHUNK_FWD_O_LN2 = 0.69314718055994530941723212145818f;
+constexpr CastTrait CHUNK_FWD_O_FP32_TO_B16_PACK = {
+    RegLayout::ZERO,
+    SatMode::NO_SAT,
+    MaskMergeMode::MERGING,
+    AscendC::RoundMode::CAST_ROUND,
+};
 
 __simd_callee__ inline void LoadGateFloatPair(RegTensor<float> &zero, RegTensor<float> &one, __ubuf__ float *src)
 {
@@ -32,8 +38,7 @@ __simd_callee__ inline void StoreGateFloatPair(__ubuf__ float *dst, RegTensor<fl
 }
 
 template <bool UseExp2>
-__simd_vf__ inline void Stage1Gate64VF(__ubuf__ float *gateOAddr, __ubuf__ float *gateAAddr, __ubuf__ float *gAddr,
-                                       uint16_t chunkLen)
+__simd_vf__ inline void Stage1Gate64VF(__ubuf__ float *gateAAddr, __ubuf__ float *gAddr, uint16_t chunkLen)
 {
     (void)chunkLen;
     constexpr uint16_t kBt = static_cast<uint16_t>(CHUNK_FWD_O_A5_BT);
@@ -41,23 +46,11 @@ __simd_vf__ inline void Stage1Gate64VF(__ubuf__ float *gateOAddr, __ubuf__ float
 
     RegTensor<float> gZeroReg;
     RegTensor<float> gOneReg;
-    RegTensor<float> gateZeroReg;
-    RegTensor<float> gateOneReg;
     RegTensor<float> gRowReg;
     RegTensor<float> rowGateZeroReg;
     RegTensor<float> rowGateOneReg;
 
     LoadGateFloatPair(gZeroReg, gOneReg, gAddr);
-
-    if constexpr (UseExp2) {
-        Muls(gateZeroReg, gZeroReg, CHUNK_FWD_O_LN2, maskFull32);
-        Muls(gateOneReg, gOneReg, CHUNK_FWD_O_LN2, maskFull32);
-    } else {
-        Adds(gateZeroReg, gZeroReg, 0.0f, maskFull32);
-        Adds(gateOneReg, gOneReg, 0.0f, maskFull32);
-    }
-    ExpFloatTwoReg(gateZeroReg, gateOneReg, gateZeroReg, gateOneReg, maskFull32);
-    StoreGateFloatPair(gateOAddr, gateZeroReg, gateOneReg, maskFull32);
 
     for (uint16_t row = 0; row < kBt; ++row) {
         LoadIn<float, true>(gRowReg, gAddr + row);
@@ -71,27 +64,50 @@ __simd_vf__ inline void Stage1Gate64VF(__ubuf__ float *gateOAddr, __ubuf__ float
     }
 }
 
-__simd_vf__ inline void Stage3GateOS64VF(__ubuf__ float *oSPrimeAddr, __ubuf__ float *oSRawAddr,
-                                         __ubuf__ float *gateOAddr, uint16_t validRows)
+__simd_vf__ inline void Stage3Gate64VF(__ubuf__ bfloat16_t *aPrimeAddr, __ubuf__ float *oSPrimeAddr,
+                                      __ubuf__ float *aRawAddr, __ubuf__ float *oSRawAddr,
+                                      __ubuf__ float *gateAAddr, __ubuf__ float *gateOAddr,
+                                      uint16_t validRows)
 {
     constexpr uint16_t kBt = static_cast<uint16_t>(CHUNK_FWD_O_A5_BT);
     constexpr uint16_t kTilesPerRow = static_cast<uint16_t>(CHUNK_FWD_O_A5_V / CHUNK_FWD_O_A5_BT);
-    RegTensor<float> dataReg;
-    RegTensor<float> gateReg;
+    RegTensor<float> aRawReg;
+    RegTensor<float> gateAReg;
+    RegTensor<float> aPrimeReg;
+    RegTensor<bfloat16_t> aPrimeBf16Reg;
+    RegTensor<float> oSRawReg;
+    RegTensor<float> gateOVectorReg;
+    RegTensor<float> gateORowReg;
     RegTensor<float> zeroReg;
+    RegTensor<uint32_t> rowIndexReg;
     MaskReg floatMask = CreateMask<float, MaskPattern::ALL>();
+    MaskReg lowerMask;
+    uint32_t lowerCount = 0;
     Duplicate(zeroReg, 0.0f, floatMask);
+    LoadAlign(gateOVectorReg, gateOAddr);
 
     for (uint16_t row = 0; row < kBt; ++row) {
-        LoadIn<float, true>(gateReg, gateOAddr + row);
+        const uint32_t matrixOffset = static_cast<uint32_t>(row) * kBt;
+        lowerCount = row < validRows ? static_cast<uint32_t>(row + 1) : 0U;
+        lowerMask = UpdateMask<float>(lowerCount);
+        LoadAlign(aRawReg, aRawAddr + matrixOffset);
+        LoadAlign(gateAReg, gateAAddr + matrixOffset);
+        Mul(aPrimeReg, aRawReg, gateAReg, floatMask);
+        Select(aPrimeReg, aPrimeReg, zeroReg, lowerMask);
+        Cast<bfloat16_t, float, CHUNK_FWD_O_FP32_TO_B16_PACK>(aPrimeBf16Reg, aPrimeReg, floatMask);
+        StoreAlign<bfloat16_t, StoreDist::DIST_PACK_B32>(
+            aPrimeAddr + matrixOffset, aPrimeBf16Reg, floatMask);
+
+        Duplicate(rowIndexReg, static_cast<uint32_t>(row), floatMask);
+        Gather(gateORowReg, gateOVectorReg, rowIndexReg);
         for (uint16_t tile = 0; tile < kTilesPerRow; ++tile) {
             const uint32_t offset =
                 static_cast<uint32_t>(row) * static_cast<uint16_t>(CHUNK_FWD_O_A5_V) +
                 static_cast<uint32_t>(tile) * kBt;
             if (row < validRows) {
-                LoadAlign(dataReg, oSRawAddr + offset);
-                Mul(dataReg, dataReg, gateReg, floatMask);
-                StoreAlign(oSPrimeAddr + offset, dataReg, floatMask);
+                LoadAlign(oSRawReg, oSRawAddr + offset);
+                Mul(oSRawReg, oSRawReg, gateORowReg, floatMask);
+                StoreAlign(oSPrimeAddr + offset, oSRawReg, floatMask);
             } else {
                 StoreAlign(oSPrimeAddr + offset, zeroReg, floatMask);
             }
@@ -136,8 +152,6 @@ public:
         }
         vToMte3Event_ = pipe_->AllocEventID<HardEvent::V_MTE3>();
         mte3ToVEvent_ = pipe_->AllocEventID<HardEvent::MTE3_V>();
-        SetFlag<HardEvent::V_MTE3>(vToMte3Event_);
-        SetFlag<HardEvent::MTE3_V>(mte3ToVEvent_);
     }
 
     __aicore__ inline void ProcessInit()
@@ -253,9 +267,17 @@ public:
         LocalTensor<float> gateO = ubBuf_.GetWithOffset<float>(bt, ChunkFwdOGateOOffset(localSlot));
         LocalTensor<float> gateA =
             ubBuf_.GetWithOffset<float>(bt * bt, ChunkFwdOGateAOffset(localSlot));
+        if constexpr (UseExp2) {
+            Muls(gateO, gFp32, CHUNK_FWD_O_LN2, bt);
+            PipeBarrier<PIPE_V>();
+            Exp(gateO, gateO, bt);
+        } else {
+            Exp(gateO, gFp32, bt);
+        }
+        PipeBarrier<PIPE_V>();
         AscendC::VF_CALL<Stage1Gate64VF<UseExp2>>(
-            (__ubuf__ float *)gateO.GetPhyAddr(), (__ubuf__ float *)gateA.GetPhyAddr(),
-            (__ubuf__ float *)gFp32.GetPhyAddr(), static_cast<uint16_t>(loc.chunkLen));
+            (__ubuf__ float *)gateA.GetPhyAddr(), (__ubuf__ float *)gFp32.GetPhyAddr(),
+            static_cast<uint16_t>(loc.chunkLen));
         PipeBarrier<PIPE_V>();
         SetFlag<HardEvent::MTE3_MTE2>(mte3ToMte2_[streamSlot]);
     }
@@ -314,29 +336,15 @@ public:
         LocalTensor<float> aRaw = ubBuf_.GetWithOffset<float>(matrixElems, ChunkFwdOARawOffset(localSlot));
         LocalTensor<float> oSRaw = ubBuf_.GetWithOffset<float>(bt * vDim, ChunkFwdOOSRawOffset(localSlot));
         LocalTensor<float> oSPrime = ubBuf_.GetWithOffset<float>(bt * vDim, ChunkFwdOOsPrimeOffset(localSlot));
-        LocalTensor<float> aPrimeFp32 =
-            ubBuf_.GetWithOffset<float>(matrixElems, CHUNK_FWD_O_UB_APRIME_FP32_OFFSET);
-
-        Mul(aPrimeFp32, aRaw, gateA, matrixElems);
-        PipeBarrier<PIPE_V>();
-
-        for (uint32_t row = 0; row < bt; ++row) {
-            for (uint32_t col = 0; col < bt; ++col) {
-                if (row >= loc.chunkLen || col >= loc.chunkLen || col > row) {
-                    aPrimeFp32.SetValue(row * bt + col, 0.0f);
-                }
-            }
-        }
-        PipeBarrier<PIPE_V>();
-
         LocalTensor<bfloat16_t> aPrimeBf16 =
-            ubBuf_.GetWithOffset<bfloat16_t>(matrixElems, ChunkFwdOARawOffset(localSlot));
-        Cast(aPrimeBf16, aPrimeFp32, RoundMode::CAST_RINT, matrixElems);
-        PipeBarrier<PIPE_V>();
+            ubBuf_.GetWithOffset<bfloat16_t>(matrixElems, CHUNK_FWD_O_UB_APRIME_BF16_OFFSET);
 
-        AscendC::VF_CALL<Stage3GateOS64VF>(
+        AscendC::VF_CALL<Stage3Gate64VF>(
+            reinterpret_cast<__ubuf__ bfloat16_t *>(aPrimeBf16.GetPhyAddr()),
             reinterpret_cast<__ubuf__ float *>(oSPrime.GetPhyAddr()),
+            reinterpret_cast<__ubuf__ float *>(aRaw.GetPhyAddr()),
             reinterpret_cast<__ubuf__ float *>(oSRaw.GetPhyAddr()),
+            reinterpret_cast<__ubuf__ float *>(gateA.GetPhyAddr()),
             reinterpret_cast<__ubuf__ float *>(gateO.GetPhyAddr()),
             static_cast<uint16_t>(loc.chunkLen));
         PipeBarrier<PIPE_V>();
@@ -344,16 +352,14 @@ public:
         SetFlag<HardEvent::V_MTE3>(vToMte3Event_);
         WaitFlag<HardEvent::V_MTE3>(vToMte3Event_);
 
-        const uint32_t aivCoreIdx = AscendC::GetBlockIdx() / AscendC::GetSubBlockNum();
-        GM_ADDR aPrimeAddr =
-            ChunkFwdOAPrimeGmOffset(workspace_, tiling_, aivCoreIdx, headOffset);
+        DumpStage3Result(loopIdx, hv, localSlot, aPrimeBf16, oSPrime);
+
+        const uint32_t aivCoreIdx = AscendC::GetBlockIdx() / 2U;
+        GM_ADDR aPrimeAddr = ChunkFwdOAPrimeGmOffset(workspace_, tiling_, aivCoreIdx, headOffset);
         GlobalTensor<bfloat16_t> aPrimeGm;
         aPrimeGm.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(aPrimeAddr));
         DataCopyExtParams aPrimeCopyParams{1, CHUNK_FWD_O_APRIME_SLOT_BYTES, 0, 0, 0};
         DataCopyPad(aPrimeGm, aPrimeBf16, aPrimeCopyParams);
-
-        // Per-head workspace dump immediately after this head's S3 compute.
-        DumpStage3Result(loopIdx, hv, localSlot, aPrimeBf16, oSPrime);
 
         SetFlag<HardEvent::MTE3_V>(mte3ToVEvent_);
         WaitFlag<HardEvent::MTE3_V>(mte3ToVEvent_);
