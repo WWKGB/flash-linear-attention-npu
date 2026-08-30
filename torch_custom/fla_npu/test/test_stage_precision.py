@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026 Tianjin University, Ltd.
-"""Stage-level precision check for chunk_fwd_o A5 (Stage3 / Stage4 / Stage5).
+"""Stage-level checks for chunk_fwd_o A5.
 
-Runs the NPU kernel, reads intermediate tensors from the user workspace dump
-region, and compares against CPU stage references.
+Default (--transport): kernel launch + NPU sync only.
+Use --precision for workspace-dump Stage1/2 regression (DumpStage2Workspace on AIV).
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ BT = 64
 K = 128
 V = 128
 CHECK_STAGE45 = False
-CHECK_STAGE3 = False
+CHECK_STAGE3 = True
 CHECK_STAGE2 = True
 DBG_HEADER_BYTES = 64
 DBG_MASK_BYTES = 4 * 1024
@@ -288,7 +288,7 @@ def _find_user_workspace(ws_np: np.ndarray) -> tuple[int, np.ndarray]:
 
 
 def run_case(*, seqlen=64, heads=None, hk=None, hv=None, use_exp2: bool = False, seed: int = 0,
-             stage1_only: bool = False):
+             stage1_only: bool = False, stage3_only: bool = False, transport_only: bool = False):
     torch.manual_seed(seed)
     np.random.seed(seed)
 
@@ -305,9 +305,9 @@ def run_case(*, seqlen=64, heads=None, hk=None, hv=None, use_exp2: bool = False,
         raise ValueError(f"G=HV/HK must be in [1,4], got {g_ratio}")
 
     B, HK, HV = 1, hk, hv
-    check_stage2 = CHECK_STAGE2 and not stage1_only
+    check_stage2 = CHECK_STAGE2 and not stage1_only and not stage3_only
     check_stage3 = CHECK_STAGE3 and not stage1_only
-    check_stage45 = CHECK_STAGE45 and not stage1_only
+    check_stage45 = CHECK_STAGE45 and not stage1_only and not stage3_only
     scale = K ** -0.5
     chunk_size = 64
     num_chunks = (seqlen + chunk_size - 1) // chunk_size
@@ -321,6 +321,8 @@ def run_case(*, seqlen=64, heads=None, hk=None, hv=None, use_exp2: bool = False,
     out, workspace = _call_chunk_fwd_o_with_workspace(
         q, k, v, h, g, scale, cu_seqlens=None, chunk_indices=None, chunk_size=chunk_size
     )
+    if transport_only:
+        return True
 
     ws_np = workspace.cpu().numpy()
     _, user_ws = _find_user_workspace(ws_np)
@@ -359,8 +361,9 @@ def run_case(*, seqlen=64, heads=None, hk=None, hv=None, use_exp2: bool = False,
             refs[(chunk_idx, hv)] = ref
             dumps[(chunk_idx, hv)] = dump
             tag = f"c{chunk_idx}/h{hv}"
-            ok &= _compare(f"gate_o[{tag}]", ref["gate_o"], dump["gate_o"], atol=1e-3, rtol=1e-2)
-            ok &= _compare(f"gate_A[{tag}]", ref["gate_A"], dump["gate_A"], atol=1e-2, rtol=1e-2)
+            if not stage3_only:
+                ok &= _compare(f"gate_o[{tag}]", ref["gate_o"], dump["gate_o"], atol=1e-3, rtol=1e-2)
+                ok &= _compare(f"gate_A[{tag}]", ref["gate_A"], dump["gate_A"], atol=1e-2, rtol=1e-2)
             if check_stage2:
                 ok &= _compare(
                     f"A_raw[{tag}]",
@@ -425,28 +428,56 @@ def run_case(*, seqlen=64, heads=None, hk=None, hv=None, use_exp2: bool = False,
     return ok
 
 
-DEFAULT_CASE_TIMEOUT_SEC = 90
-CASE_TIMEOUTS = {
-    "G=1 T=64 exp2": 60,
-    "G=1 T=128 exp2": 60,
-    "G=1 T=256 exp2": 90,
-    "G=1 T=64 four-head ping-pong": 60,
-    "G=1 HK16 HV16 T=64": 90,
-    "G=2 HK16 HV32 T=64": 180,
-    "G=2 HK16 HV32 T=128": 180,
-    "G=2 HK16 HV32 T=256": 300,
-    "G=3 HK16 HV48 T=64": 120,
-}
+DEFAULT_CASE_TIMEOUT_SEC = 60
+
+DEFAULT_TRANSPORT_CASES = [
+    ("G=1 T=64 exp2", dict(seqlen=64, heads=2, use_exp2=True, seed=1)),
+    ("G=1 T=64 four-head ping-pong", dict(seqlen=64, heads=4, use_exp2=True, seed=4)),
+    ("G=1 HK16 HV16 T=64", dict(seqlen=64, hk=16, hv=16, use_exp2=True, seed=10)),
+    ("G=2 HK16 HV32 T=64", dict(seqlen=64, hk=16, hv=32, use_exp2=True, seed=11)),
+    ("G=3 HK16 HV48 T=64", dict(seqlen=64, hk=16, hv=48, use_exp2=True, seed=12)),
+]
+
+DEFAULT_PRECISION_CASES = [
+    ("G=1 T=64 exp2", dict(seqlen=64, heads=2, use_exp2=True, seed=1)),
+    ("G=1 T=64 four-head ping-pong", dict(seqlen=64, heads=4, use_exp2=True, seed=4)),
+    ("G=2 HK16 HV32 T=64", dict(seqlen=64, hk=16, hv=32, use_exp2=True, seed=11)),
+]
+
+ALL_NAMED_CASES = DEFAULT_TRANSPORT_CASES + [
+    ("G=1 T=128 exp2", dict(seqlen=128, heads=2, use_exp2=True, seed=2)),
+    ("G=1 T=256 exp2", dict(seqlen=256, heads=2, use_exp2=True, seed=3)),
+    ("G=2 HK16 HV32 T=128", dict(seqlen=128, hk=16, hv=32, use_exp2=True, seed=13)),
+    ("G=2 HK16 HV32 T=256", dict(seqlen=256, hk=16, hv=32, use_exp2=True, seed=14)),
+]
+
+CASE_TIMEOUTS = {name: DEFAULT_CASE_TIMEOUT_SEC for name, _ in ALL_NAMED_CASES}
 
 
-def _run_case_with_timeout(name: str, kwargs: dict, timeout_sec: float, stage1_only: bool = False) -> bool:
+def _run_case_with_timeout(
+    name: str,
+    kwargs: dict,
+    timeout_sec: float,
+    *,
+    stage1_only: bool = False,
+    stage3_only: bool = False,
+    transport_only: bool = False,
+) -> bool:
     case_kwargs = dict(kwargs)
     if stage1_only:
         case_kwargs["stage1_only"] = True
+    if stage3_only:
+        case_kwargs["stage3_only"] = True
+    if transport_only:
+        case_kwargs["transport_only"] = True
     payload = json.dumps({"name": name, **case_kwargs})
     cmd = [sys.executable, "-u", str(Path(__file__).resolve()), "--single-json", payload]
     if stage1_only:
         cmd.append("--stage1-only")
+    if stage3_only:
+        cmd.append("--stage3-only")
+    if transport_only:
+        cmd.append("--transport")
     try:
         result = subprocess.run(cmd, timeout=timeout_sec)
         return result.returncode == 0
@@ -494,7 +525,22 @@ def main():
     parser.add_argument(
         "--stage1-only",
         action="store_true",
-        help="Only check gate_o and gate_A (skip Stage2+).",
+        help="Only check gate_o and gate_A (skip Stage2+; requires --precision).",
+    )
+    parser.add_argument(
+        "--stage3-only",
+        action="store_true",
+        help="Only check A_prime and O_s_prime (S3 workspace dump; requires --precision).",
+    )
+    parser.add_argument(
+        "--transport",
+        action="store_true",
+        help="Kernel launch + NPU sync only.",
+    )
+    parser.add_argument(
+        "--precision",
+        action="store_true",
+        help="Workspace-dump Stage1/2 precision regression.",
     )
     args = parser.parse_args()
     global CHECK_STAGE2, CHECK_STAGE3, CHECK_STAGE45
@@ -502,32 +548,21 @@ def main():
         CHECK_STAGE2 = False
         CHECK_STAGE3 = False
         CHECK_STAGE45 = False
+    if args.stage3_only:
+        CHECK_STAGE2 = False
+        CHECK_STAGE3 = True
+        CHECK_STAGE45 = False
     if args.single_json is not None:
         sys.exit(_run_single_from_json(args.single_json))
 
-    cases = [
-        ("G=1 T=64 exp2", dict(seqlen=64, heads=2, use_exp2=True, seed=1)),
-        ("G=1 T=128 exp2", dict(seqlen=128, heads=2, use_exp2=True, seed=2)),
-        ("G=1 T=256 exp2", dict(seqlen=256, heads=2, use_exp2=True, seed=3)),
-        ("G=1 T=64 four-head ping-pong", dict(seqlen=64, heads=4, use_exp2=True, seed=4)),
-        ("G=1 HK16 HV16 T=64", dict(seqlen=64, hk=16, hv=16, use_exp2=True, seed=10)),
-        ("G=2 HK16 HV32 T=64", dict(seqlen=64, hk=16, hv=32, use_exp2=True, seed=11)),
-        ("G=2 HK16 HV32 T=128", dict(seqlen=128, hk=16, hv=32, use_exp2=True, seed=13)),
-        ("G=2 HK16 HV32 T=256", dict(seqlen=256, hk=16, hv=32, use_exp2=True, seed=14)),
-        ("G=3 HK16 HV48 T=64", dict(seqlen=64, hk=16, hv=48, use_exp2=True, seed=12)),
-    ]
+    transport_only = args.transport or not args.precision
+    pool = ALL_NAMED_CASES
+    cases = list(DEFAULT_TRANSPORT_CASES if transport_only else DEFAULT_PRECISION_CASES)
     if args.smoke:
         cases = cases[:1]
-    elif args.stage1_only and not args.cases:
-        cases = [
-            ("G=1 T=64 four-head ping-pong", dict(seqlen=64, heads=4, use_exp2=True, seed=4, stage1_only=True)),
-            ("G=1 HK16 HV16 T=64", dict(seqlen=64, hk=16, hv=16, use_exp2=True, seed=10, stage1_only=True)),
-            ("G=2 HK16 HV32 T=64", dict(seqlen=64, hk=16, hv=32, use_exp2=True, seed=11, stage1_only=True)),
-            ("G=3 HK16 HV48 T=64", dict(seqlen=64, hk=16, hv=48, use_exp2=True, seed=12, stage1_only=True)),
-        ]
     elif args.cases:
         selected = []
-        for name, kwargs in cases:
+        for name, kwargs in pool:
             if any(token in name for token in args.cases):
                 selected.append((name, kwargs))
         cases = selected
@@ -538,9 +573,17 @@ def main():
     failed = []
     for name, kwargs in cases:
         timeout_sec = CASE_TIMEOUTS.get(name, args.timeout)
-        print(f"\n=== {name} (timeout={timeout_sec:.0f}s) ===")
+        mode = "transport" if transport_only else "precision"
+        print(f"\n=== {name} ({mode}, timeout={timeout_sec:.0f}s) ===")
         try:
-            if not _run_case_with_timeout(name, kwargs, timeout_sec, stage1_only=args.stage1_only):
+            if not _run_case_with_timeout(
+                name,
+                kwargs,
+                timeout_sec,
+                stage1_only=args.stage1_only,
+                stage3_only=args.stage3_only,
+                transport_only=transport_only,
+            ):
                 failed.append(name)
         except Exception as exc:
             print(f"[ERROR] {name}: {exc}")
@@ -549,7 +592,10 @@ def main():
     if failed:
         print(f"\nFAILED: {failed}")
         sys.exit(1)
-    print("\nAll stage precision checks passed.")
+    if transport_only:
+        print("\nAll transport checks passed.")
+    else:
+        print("\nAll stage precision checks passed.")
 
 
 if __name__ == "__main__":

@@ -4,11 +4,11 @@
  *
  * A5 L1<->UB chunk_fwd_o path.
  *
- * Bring-up status (WIP):
- * - Stage1: UB layout §5.3 + streamSlot prefetch/compute aligned (ProcessStage1Group).
- * - Stage2: streamSlot ping-pong wiring pending; enable after S1/S2 handshake validated.
- * - Stage3/4/5: not started.
- * - Risk: kernel may hang at synchronize until Stage2 streamSlot is fully integrated.
+ * Stage1/2: validated (precision passed); do not regress.
+ * Stage2 (AIC): L0/L1 streamSlot ping-pong + per-head CrossCore (59e83dc / PR404).
+ * Stage3 (AIV): sync done — per-head S1→WaitStage2→S3, mode=0x2 pair handshake,
+ *   no SyncAll (see chunk_gdn_bwd_finalize_vector.h). Precision still WIP.
+ * Transport: four-head ping-pong PASS; Stage3 numeric check pending.
  */
 
 #ifndef CHUNK_FWD_O_ARCH35_A5_H
@@ -25,9 +25,9 @@ namespace GDN {
 template <typename GT, bool UseExp2>
 class ChunkFwdOA5 {
 public:
-    static constexpr bool kEnableStage1 = false;
-    static constexpr bool kEnableStage2 = false;
-    static constexpr bool kEnableStage3 = false;
+    static constexpr bool kEnableStage1 = true;
+    static constexpr bool kEnableStage2 = true;
+    static constexpr bool kEnableStage3 = true;
 
     __aicore__ inline void Init(GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR h, GM_ADDR g, GM_ADDR cuSeqlens,
                                 GM_ADDR chunkOffsets, GM_ADDR o, GM_ADDR workspace,
@@ -49,7 +49,7 @@ public:
     {
         const uint32_t aicCoreIdx = AscendC::GetBlockIdx();
         const uint32_t aicCoreNum = AscendC::GetBlockNum();
-        const uint32_t aivCoreIdx = AscendC::GetBlockIdx() / AscendC::GetSubBlockNum();
+        const uint32_t aivCoreIdx = AscendC::GetBlockIdx() / 2U;
         const uint32_t aivCoreNum = AscendC::GetBlockNum();
 
         if ASCEND_IS_AIV {
@@ -90,27 +90,34 @@ private:
             for (int64_t hvBase = 0; hvBase < tiling_.vNumHead; hvBase += tiling_.taskGroupSize) {
                 const int64_t remaining = tiling_.vNumHead - hvBase;
                 const int64_t taskCount = remaining < tiling_.taskGroupSize ? remaining : tiling_.taskGroupSize;
-                vector.ProcessStage1Group(loopIdx, loc, hvBase, taskCount, subBlockIdx);
-                vector.SignalStage1GroupDone();
-                // Stage2 consumer loop: per-head IDs allow AIC Stage2(head N)
-                // to overlap AIV Stage1(head N+1) without flag reuse.
+                vector.BeginStage1GroupPrefetch(loc, hvBase, taskCount, subBlockIdx);
+                // AIV per-head pipeline (PR404 V-side): owner computes; both subblocks
+                // lock-step on headOffset. SignalStage1Ready / SignalStage2Consumed use
+                // mode=0x2 (non-owner participates without compute). No SyncAll.
+                // Finish S3 for head N before S1 reuses localSlot(N+2).
                 for (int64_t headOffset = 0; headOffset < taskCount; ++headOffset) {
-                    vector.WaitStage2Ready(static_cast<uint32_t>(headOffset));
                     const uint32_t ownerSubBlock = static_cast<uint32_t>(headOffset % 2);
+                    const uint32_t localSlot = static_cast<uint32_t>(headOffset / 2);
+                    const int64_t hv = hvBase + headOffset;
                     if (ownerSubBlock == subBlockIdx) {
-                        const uint32_t localSlot = static_cast<uint32_t>(headOffset / 2);
-                        const int64_t hv = hvBase + headOffset;
-                        vector.DumpStage1Result(loopIdx, loc, hv, localSlot);
-                        vector.DumpStage2ARaw(loopIdx, hv, localSlot);
-                        vector.DumpStage2OSRaw(loopIdx, hv, localSlot);
-                        if constexpr (kEnableStage3) {
-                            const int64_t hk = hv / tiling_.hvPerHk;
-                            vector.ProcessStage3(loopIdx, loc, hk, hv);
-                        }
+                        vector.ProcessStage1Head(loopIdx, loc, hvBase, headOffset, taskCount, subBlockIdx);
                     }
-                    vector.SignalStage2Consumed(static_cast<uint32_t>(headOffset));
+                    vector.SignalStage1Ready(static_cast<uint32_t>(headOffset));
+                    if constexpr (kEnableStage2) {
+                        vector.WaitStage2Ready(static_cast<uint32_t>(headOffset));
+                        if (ownerSubBlock == subBlockIdx) {
+                            if constexpr (kEnableStage3) {
+                                const int64_t hk = hv / tiling_.hvPerHk;
+                                vector.ProcessStage3(loopIdx, loc, hk, hv, localSlot,
+                                                     static_cast<uint32_t>(headOffset));
+                            }
+                        }
+                        vector.SignalStage2Consumed(static_cast<uint32_t>(headOffset));
+                    }
                 }
-                vector.ReleaseStage2Group();
+                if constexpr (kEnableStage2) {
+                    vector.ReleaseStage2Group();
+                }
             }
         }
     }
@@ -127,18 +134,7 @@ private:
             for (int64_t hvBase = 0; hvBase < tiling_.vNumHead; hvBase += tiling_.taskGroupSize) {
                 const int64_t remaining = tiling_.vNumHead - hvBase;
                 const int64_t taskCount = remaining < tiling_.taskGroupSize ? remaining : tiling_.taskGroupSize;
-                for (int64_t headOffset = 0; headOffset < taskCount; ++headOffset) {
-                    if (headOffset >= 2) {
-                        cube.WaitStage2Consumed(static_cast<uint32_t>(headOffset - 2));
-                    }
-                    cube.WaitStage1Ready(static_cast<uint32_t>(headOffset));
-                    const int64_t hv = hvBase + headOffset;
-                    const int64_t hk = hv / tiling_.hvPerHk;
-                    const uint32_t ownerSubBlock = static_cast<uint32_t>(headOffset % 2);
-                    const uint32_t localSlot = static_cast<uint32_t>(headOffset / 2);
-                    cube.ProcessStage2(
-                        loopIdx, loc, hk, hv, ownerSubBlock, localSlot, static_cast<uint32_t>(headOffset));
-                }
+                cube.ProcessStage2Group(loopIdx, loc, hvBase, taskCount);
                 cube.WaitStage2GroupRelease();
             }
         }

@@ -82,25 +82,46 @@ __aicore__ inline GM_ADDR ChunkFwdOAPrimeGmOffset(GM_ADDR workspace, const Chunk
 constexpr uint32_t CHUNK_FWD_O_L1_Q_BASE = 0U;
 constexpr uint32_t CHUNK_FWD_O_L1_K_BASE = 64U * 1024U;
 constexpr uint32_t CHUNK_FWD_O_L1_H_BASE = 128U * 1024U;
-constexpr uint32_t CHUNK_FWD_O_L1_Q_SLOT_BYTES = 64U * 1024U;
-constexpr uint32_t CHUNK_FWD_O_L1_K_SLOT_BYTES = 64U * 1024U;
-constexpr uint32_t CHUNK_FWD_O_L1_H_SLOT_BYTES = 128U * 1024U;
-constexpr uint32_t CHUNK_FWD_O_L0AB_QH_OFFSET = 32U * 1024U;
-constexpr uint32_t CHUNK_FWD_O_L0C_QH_OFFSET = 32U * 1024U;
+constexpr uint32_t CHUNK_FWD_O_L1_STREAM_BANK_BYTES = 256U * 1024U;
+
+constexpr uint32_t CHUNK_FWD_O_L0_BUFFER_COUNT = 2U;
+constexpr uint32_t CHUNK_FWD_O_L0_A_BYTES = 32U * 1024U;
+constexpr uint32_t CHUNK_FWD_O_L0_B_BYTES = 32U * 1024U;
+constexpr uint32_t CHUNK_FWD_O_L0_C_BYTES = 128U * 1024U;
+
+__aicore__ inline uint32_t ChunkFwdOL1StreamBankBase(uint32_t streamSlot)
+{
+    return streamSlot * CHUNK_FWD_O_L1_STREAM_BANK_BYTES;
+}
 
 __aicore__ inline uint32_t ChunkFwdOL1QOffset(uint32_t streamSlot)
 {
-    return CHUNK_FWD_O_L1_Q_BASE + streamSlot * CHUNK_FWD_O_L1_Q_SLOT_BYTES;
+    return ChunkFwdOL1StreamBankBase(streamSlot) + CHUNK_FWD_O_L1_Q_BASE;
 }
 
 __aicore__ inline uint32_t ChunkFwdOL1KOffset(uint32_t streamSlot)
 {
-    return CHUNK_FWD_O_L1_K_BASE + streamSlot * CHUNK_FWD_O_L1_K_SLOT_BYTES;
+    return ChunkFwdOL1StreamBankBase(streamSlot) + CHUNK_FWD_O_L1_K_BASE;
 }
 
 __aicore__ inline uint32_t ChunkFwdOL1HOffset(uint32_t streamSlot)
 {
-    return CHUNK_FWD_O_L1_H_BASE + streamSlot * CHUNK_FWD_O_L1_H_SLOT_BYTES;
+    return ChunkFwdOL1StreamBankBase(streamSlot) + CHUNK_FWD_O_L1_H_BASE;
+}
+
+__aicore__ inline uint32_t ChunkFwdOL0AOffset(uint32_t slot)
+{
+    return slot * CHUNK_FWD_O_L0_A_BYTES;
+}
+
+__aicore__ inline uint32_t ChunkFwdOL0BOffset(uint32_t slot)
+{
+    return slot * CHUNK_FWD_O_L0_B_BYTES;
+}
+
+__aicore__ inline uint32_t ChunkFwdOL0COffset(uint32_t slot)
+{
+    return slot * CHUNK_FWD_O_L0_C_BYTES;
 }
 
 constexpr uint64_t CHUNK_FWD_O_VEC_TO_CUBE_RELEASE_FLAG = 1;
@@ -247,6 +268,15 @@ __aicore__ inline void ChunkFwdODumpUbToGm(GM_ADDR slotBase, uint32_t slotOff, A
     AscendC::GlobalTensor<T> dstGm;
     dstGm.SetGlobalBuffer(reinterpret_cast<__gm__ T *>(slotBase + slotOff));
     DataCopy(dstGm, src, count);
+}
+
+template <typename T>
+__aicore__ inline void ChunkFwdODumpGmToUb(GM_ADDR slotBase, uint32_t slotOff, AscendC::LocalTensor<T> &dst,
+                                           uint32_t count)
+{
+    AscendC::GlobalTensor<T> srcGm;
+    srcGm.SetGlobalBuffer(reinterpret_cast<__gm__ T *>(slotBase + slotOff));
+    DataCopy(dst, srcGm, count);
 }
 
 } // namespace GDN
