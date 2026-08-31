@@ -33,10 +33,16 @@ constexpr uint32_t CHUNK_FWD_O_UB_APRIME_FP32_OFFSET = 208U * 1024U;
 constexpr uint32_t CHUNK_FWD_O_UB_APRIME_FP32_BYTES = 16U * 1024U;
 constexpr uint32_t CHUNK_FWD_O_UB_APRIME_BF16_OFFSET =
     CHUNK_FWD_O_UB_APRIME_FP32_OFFSET + CHUNK_FWD_O_UB_APRIME_FP32_BYTES;
+constexpr uint32_t CHUNK_FWD_O_STREAM_BANK_COUNT = 2U;
+constexpr uint32_t CHUNK_FWD_O_UB_APRIME_BF16_SLOT_BYTES = CHUNK_FWD_O_APRIME_SLOT_BYTES;
+constexpr uint32_t CHUNK_FWD_O_UB_APRIME_BF16_SLOT_COUNT = CHUNK_FWD_O_STREAM_BANK_COUNT;
 constexpr uint32_t CHUNK_FWD_O_UB_TOTAL_BYTES = 248U * 1024U;
 constexpr uint32_t CHUNK_FWD_O_UB_STAGE3_END = CHUNK_FWD_O_UB_TOTAL_BYTES;
 
-constexpr uint32_t CHUNK_FWD_O_STREAM_BANK_COUNT = 2U;
+static_assert(CHUNK_FWD_O_UB_APRIME_BF16_OFFSET +
+                  CHUNK_FWD_O_UB_APRIME_BF16_SLOT_COUNT * CHUNK_FWD_O_UB_APRIME_BF16_SLOT_BYTES <=
+              CHUNK_FWD_O_UB_TOTAL_BYTES,
+              "Stage3 A-prime ping/pong exceeds UB capacity.");
 
 __aicore__ inline uint32_t ChunkFwdOGateOOffset(uint32_t slot)
 {
@@ -66,6 +72,12 @@ __aicore__ inline uint32_t ChunkFwdOOSRawOffset(uint32_t slot)
 __aicore__ inline uint32_t ChunkFwdOOsPrimeOffset(uint32_t slot)
 {
     return ChunkFwdOOSRawOffset(slot);
+}
+
+__aicore__ inline uint32_t ChunkFwdOAPrimeBf16Offset(uint32_t streamSlot)
+{
+    return CHUNK_FWD_O_UB_APRIME_BF16_OFFSET +
+           streamSlot * CHUNK_FWD_O_UB_APRIME_BF16_SLOT_BYTES;
 }
 
 __aicore__ inline uint32_t ChunkFwdOOlOffset(uint32_t slot)

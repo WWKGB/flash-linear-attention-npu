@@ -6,9 +6,8 @@
  *
  * Stage1/2: validated (precision passed); do not regress.
  * Stage2 (AIC): L0/L1 streamSlot ping-pong + per-head CrossCore (59e83dc / PR404).
- * Stage3 (AIV): sync done — per-head S1→WaitStage2→S3, mode=0x2 pair handshake,
- *   no SyncAll (see chunk_gdn_bwd_finalize_vector.h). Precision still WIP.
- * Transport: four-head ping-pong PASS; Stage3 numeric check pending.
+ * Stage3 (AIV): per-head S1→WaitStage2→S3, mode=0x2 pair handshake and
+ *   independent A-prime/V-to-MTE3 ping-pong, without SyncAll.
  */
 
 #ifndef CHUNK_FWD_O_ARCH35_A5_H
@@ -91,6 +90,9 @@ private:
                 const int64_t remaining = tiling_.vNumHead - hvBase;
                 const int64_t taskCount = remaining < tiling_.taskGroupSize ? remaining : tiling_.taskGroupSize;
                 vector.BeginStage1GroupPrefetch(loc, hvBase, taskCount, subBlockIdx);
+                if constexpr (kEnableStage3) {
+                    vector.BeginStage3Group();
+                }
                 // AIV per-head pipeline (PR404 V-side): owner computes; both subblocks
                 // lock-step on headOffset. SignalStage1Ready / SignalStage2Consumed use
                 // mode=0x2 (non-owner participates without compute). No SyncAll.
@@ -114,6 +116,9 @@ private:
                         }
                         vector.SignalStage2Consumed(static_cast<uint32_t>(headOffset));
                     }
+                }
+                if constexpr (kEnableStage3) {
+                    vector.FinishStage3Group();
                 }
                 if constexpr (kEnableStage2) {
                     vector.ReleaseStage2Group();

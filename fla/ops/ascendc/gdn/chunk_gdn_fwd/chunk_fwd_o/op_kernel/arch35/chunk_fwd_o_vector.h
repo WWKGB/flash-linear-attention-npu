@@ -121,8 +121,8 @@ public:
     using ArchTag = Catlass::Arch::Ascend950;
 
     static constexpr bool kEnableStage3Compute = true;
-    // S1/S2 precision validated — workspace dump off. Stage3 dump runs immediately
-    // after each head's ProcessStage3 compute (per-head MTE3→GM), never batched late.
+    // S1/S2 precision validated — workspace dump off. Stage3 dump is issued after
+    // each head's VF; MTE3 completion is drained per ping/pong slot at group end.
     static constexpr bool kEnableStage3WorkspaceDump = true;
     static constexpr bool kEnableStage12WorkspaceDump = false;
     static constexpr uint32_t kStreamBankCount = CHUNK_FWD_O_STREAM_BANK_COUNT;
@@ -144,14 +144,16 @@ public:
         for (uint32_t bankIdx = 0; bankIdx < kStreamBankCount; ++bankIdx) {
             mte2ToV_[bankIdx] = pipe_->AllocEventID<HardEvent::MTE2_V>();
             vToMte3Stream_[bankIdx] = pipe_->AllocEventID<HardEvent::V_MTE3>();
+            mte3ToVStream_[bankIdx] = pipe_->AllocEventID<HardEvent::MTE3_V>();
             mte3ToMte2_[bankIdx] = pipe_->AllocEventID<HardEvent::MTE3_MTE2>();
+            // No previous MTE3 owns either Stage3 output slot on the first group.
+            SetFlag<HardEvent::MTE3_V>(mte3ToVStream_[bankIdx]);
             SetFlag<HardEvent::MTE3_MTE2>(mte3ToMte2_[bankIdx]);
         }
         for (uint32_t slotIdx = 0; slotIdx < kLocalSlotCount; ++slotIdx) {
             gateReadyEvent_[slotIdx] = pipe_->AllocEventID<HardEvent::V_MTE2>();
         }
         vToMte3Event_ = pipe_->AllocEventID<HardEvent::V_MTE3>();
-        mte3ToVEvent_ = pipe_->AllocEventID<HardEvent::MTE3_V>();
     }
 
     __aicore__ inline void ProcessInit()
@@ -279,7 +281,6 @@ public:
             (__ubuf__ float *)gateA.GetPhyAddr(), (__ubuf__ float *)gFp32.GetPhyAddr(),
             static_cast<uint16_t>(loc.chunkLen));
         PipeBarrier<PIPE_V>();
-        SetFlag<HardEvent::MTE3_MTE2>(mte3ToMte2_[streamSlot]);
     }
 
     __aicore__ inline void BeginStage1GroupPrefetch(const ChunkFwdOChunkLoc &loc, int64_t hvBase, int64_t taskCount,
@@ -317,6 +318,25 @@ public:
         }
     }
 
+    __aicore__ inline void BeginStage3Group()
+    {
+        stage3StreamSlot_ = 0U;
+        stage3ActiveMask_ = 0U;
+    }
+
+    __aicore__ inline void FinishStage3Group()
+    {
+        for (uint32_t streamSlot = 0; streamSlot < kStreamBankCount; ++streamSlot) {
+            if ((stage3ActiveMask_ & (1U << streamSlot)) == 0U) {
+                continue;
+            }
+            WaitFlag<HardEvent::MTE3_V>(mte3ToVStream_[streamSlot]);
+            // Rearm the first-use permission consumed by the next task group.
+            SetFlag<HardEvent::MTE3_V>(mte3ToVStream_[streamSlot]);
+        }
+        stage3ActiveMask_ = 0U;
+    }
+
     __aicore__ inline void ProcessStage3(uint32_t loopIdx, const ChunkFwdOChunkLoc &loc, int64_t hk, int64_t hv,
                                          uint32_t localSlot, uint32_t headOffset)
     {
@@ -328,8 +348,12 @@ public:
         constexpr uint32_t bt = static_cast<uint32_t>(CHUNK_FWD_O_A5_BT);
         constexpr uint32_t vDim = static_cast<uint32_t>(CHUNK_FWD_O_A5_V);
         const uint32_t matrixElems = bt * bt;
+        const uint32_t streamSlot = stage3StreamSlot_;
 
         WaitGateReady(localSlot);
+        // The previous MTE3 reader of this ping/pong slot must finish before V
+        // overwrites it. The other slot remains available to the next owner HV.
+        WaitFlag<HardEvent::MTE3_V>(mte3ToVStream_[streamSlot]);
 
         LocalTensor<float> gateO = ubBuf_.GetWithOffset<float>(bt, ChunkFwdOGateOOffset(localSlot));
         LocalTensor<float> gateA = ubBuf_.GetWithOffset<float>(matrixElems, ChunkFwdOGateAOffset(localSlot));
@@ -337,7 +361,7 @@ public:
         LocalTensor<float> oSRaw = ubBuf_.GetWithOffset<float>(bt * vDim, ChunkFwdOOSRawOffset(localSlot));
         LocalTensor<float> oSPrime = ubBuf_.GetWithOffset<float>(bt * vDim, ChunkFwdOOsPrimeOffset(localSlot));
         LocalTensor<bfloat16_t> aPrimeBf16 =
-            ubBuf_.GetWithOffset<bfloat16_t>(matrixElems, CHUNK_FWD_O_UB_APRIME_BF16_OFFSET);
+            ubBuf_.GetWithOffset<bfloat16_t>(matrixElems, ChunkFwdOAPrimeBf16Offset(streamSlot));
 
         AscendC::VF_CALL<Stage3Gate64VF>(
             reinterpret_cast<__ubuf__ bfloat16_t *>(aPrimeBf16.GetPhyAddr()),
@@ -349,8 +373,8 @@ public:
             static_cast<uint16_t>(loc.chunkLen));
         PipeBarrier<PIPE_V>();
 
-        SetFlag<HardEvent::V_MTE3>(vToMte3Event_);
-        WaitFlag<HardEvent::V_MTE3>(vToMte3Event_);
+        SetFlag<HardEvent::V_MTE3>(vToMte3Stream_[streamSlot]);
+        WaitFlag<HardEvent::V_MTE3>(vToMte3Stream_[streamSlot]);
 
         DumpStage3Result(loopIdx, hv, localSlot, aPrimeBf16, oSPrime);
 
@@ -361,8 +385,13 @@ public:
         DataCopyExtParams aPrimeCopyParams{1, CHUNK_FWD_O_APRIME_SLOT_BYTES, 0, 0, 0};
         DataCopyPad(aPrimeGm, aPrimeBf16, aPrimeCopyParams);
 
-        SetFlag<HardEvent::MTE3_V>(mte3ToVEvent_);
-        WaitFlag<HardEvent::MTE3_V>(mte3ToVEvent_);
+        // Close the complete slot lifecycle only after all current MTE3 reads
+        // have been issued. The next-group MTE2 and next V reuse wait on their
+        // respective reverse dependencies while the other slot keeps running.
+        SetFlag<HardEvent::MTE3_MTE2>(mte3ToMte2_[streamSlot]);
+        SetFlag<HardEvent::MTE3_V>(mte3ToVStream_[streamSlot]);
+        stage3ActiveMask_ |= 1U << streamSlot;
+        stage3StreamSlot_ ^= 1U;
     }
 
     __aicore__ inline void DumpStage3Result(uint32_t loopIdx, int64_t hv, uint32_t localSlot,
@@ -467,12 +496,14 @@ private:
 
     TBuf<TPosition::VECCALC> ubBuf_;
     uint32_t streamSlot_ = 0;
+    uint32_t stage3StreamSlot_ = 0;
+    uint32_t stage3ActiveMask_ = 0;
     TEventID mte2ToV_[kStreamBankCount];
     TEventID vToMte3Stream_[kStreamBankCount];
+    TEventID mte3ToVStream_[kStreamBankCount];
     TEventID mte3ToMte2_[kStreamBankCount];
     TEventID gateReadyEvent_[kLocalSlotCount];
     TEventID vToMte3Event_ = 0;
-    TEventID mte3ToVEvent_ = 0;
     Catlass::Arch::CrossCoreFlag groupReleaseFlag_{CHUNK_FWD_O_VEC_TO_CUBE_RELEASE_FLAG};
     Catlass::Arch::CrossCoreFlag stage1GroupDoneFlag_{CHUNK_FWD_O_S1_GROUP_DONE_FLAG};
 };
