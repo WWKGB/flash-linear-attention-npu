@@ -60,9 +60,6 @@ public:
             ChunkFwdOA5VectorProcess<GT, UseExp2> vector(q_, k_, v_, h_, g_, cuSeqlens_, chunkOffsets_, o_,
                                                        workspace_);
             vector.Init(tiling_, &pipe);
-            if (AscendC::GetSubBlockIdx() == 0) {
-                vector.ProcessInit();
-            }
             if constexpr (kEnableStage1) {
                 RunStage1Aiv(vector, aivCoreIdx, aivCoreNum);
             }
@@ -104,18 +101,15 @@ private:
                 for (int64_t headOffset = 0; headOffset < taskCount; ++headOffset) {
                     const uint32_t ownerSubBlock = static_cast<uint32_t>(headOffset % 2);
                     const uint32_t localSlot = static_cast<uint32_t>(headOffset / 2);
-                    const int64_t hv = hvBase + headOffset;
                     if (ownerSubBlock == subBlockIdx) {
-                        vector.ProcessStage1Head(loopIdx, loc, hvBase, headOffset, taskCount, subBlockIdx);
+                        vector.ProcessStage1Head(loc, hvBase, headOffset, taskCount, subBlockIdx);
                     }
                     vector.SignalStage1Ready(static_cast<uint32_t>(headOffset));
                     if constexpr (kEnableStage2) {
                         vector.WaitStage2Ready(static_cast<uint32_t>(headOffset));
                         if (ownerSubBlock == subBlockIdx) {
                             if constexpr (kEnableStage3) {
-                                const int64_t hk = hv / tiling_.hvPerHk;
-                                vector.ProcessStage3(loopIdx, loc, hk, hv, localSlot,
-                                                     static_cast<uint32_t>(headOffset));
+                                vector.ProcessStage3(loc, localSlot, static_cast<uint32_t>(headOffset));
                             }
                         }
                         if constexpr (kEnableStage4) {
@@ -134,7 +128,6 @@ private:
                         const int64_t hv = hvBase + headOffset;
                         vector.WaitStage4Ready(static_cast<uint32_t>(headOffset));
                         if (ownerSubBlock == subBlockIdx) {
-                            vector.DumpStage4Result(loopIdx, hv, localSlot);
                             if constexpr (kEnableStage5) {
                                 vector.ProcessStage5(loc, hv, localSlot);
                             }

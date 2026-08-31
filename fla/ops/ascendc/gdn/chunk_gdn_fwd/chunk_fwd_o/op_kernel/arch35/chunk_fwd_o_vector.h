@@ -159,11 +159,6 @@ public:
     using ArchTag = Catlass::Arch::Ascend950;
 
     static constexpr bool kEnableStage3Compute = true;
-    // S1/S2 precision validated — workspace dump off. Stage3 dump is issued after
-    // each head's VF; MTE3 completion is drained per ping/pong slot at group end.
-    static constexpr bool kEnableStage3WorkspaceDump = true;
-    static constexpr bool kEnableStage4WorkspaceDump = true;
-    static constexpr bool kEnableStage12WorkspaceDump = false;
     static constexpr uint32_t kStreamBankCount = CHUNK_FWD_O_STREAM_BANK_COUNT;
     static constexpr uint32_t kLocalSlotCount = 2U;
 
@@ -194,14 +189,6 @@ public:
             gateReadyEvent_[slotIdx] = pipe_->AllocEventID<HardEvent::V_MTE2>();
         }
         vToMte3Event_ = pipe_->AllocEventID<HardEvent::V_MTE3>();
-        stage4DumpMte3ToVEvent_ = pipe_->AllocEventID<HardEvent::MTE3_V>();
-    }
-
-    __aicore__ inline void ProcessInit()
-    {
-        if (AscendC::GetSubBlockIdx() == 0) {
-            ChunkFwdOWriteDebugHeader(workspace_, tiling_);
-        }
     }
 
     __aicore__ inline void WaitStage2Ready(uint32_t headOffset)
@@ -349,27 +336,26 @@ public:
         }
     }
 
-    __aicore__ inline void ProcessStage1Head(uint32_t loopIdx, const ChunkFwdOChunkLoc &loc, int64_t hvBase,
-                                             int64_t headOffset, int64_t taskCount, uint32_t subBlockIdx)
+    __aicore__ inline void ProcessStage1Head(const ChunkFwdOChunkLoc &loc, int64_t hvBase, int64_t headOffset,
+                                             int64_t taskCount, uint32_t subBlockIdx)
     {
         const uint32_t localSlot = static_cast<uint32_t>(headOffset / 2);
         const int64_t nextOwner = FindNextOwnerHeadOffset(headOffset, taskCount, subBlockIdx);
         if (nextOwner >= 0) {
             PrefetchStage1G(loc, hvBase + nextOwner, streamSlot_ ^ 1U);
         }
-        const int64_t hv = hvBase + headOffset;
         ComputeStage1Gate(loc, localSlot, streamSlot_);
         SignalGateReady(localSlot);
         streamSlot_ ^= 1U;
     }
 
-    __aicore__ inline void ProcessStage1Group(uint32_t loopIdx, const ChunkFwdOChunkLoc &loc, int64_t hvBase,
-                                              int64_t taskCount, uint32_t subBlockIdx)
+    __aicore__ inline void ProcessStage1Group(const ChunkFwdOChunkLoc &loc, int64_t hvBase, int64_t taskCount,
+                                              uint32_t subBlockIdx)
     {
         BeginStage1GroupPrefetch(loc, hvBase, taskCount, subBlockIdx);
         for (int64_t headOffset = 0; headOffset < taskCount; ++headOffset) {
             if (static_cast<uint32_t>(headOffset % 2) == subBlockIdx) {
-                ProcessStage1Head(loopIdx, loc, hvBase, headOffset, taskCount, subBlockIdx);
+                ProcessStage1Head(loc, hvBase, headOffset, taskCount, subBlockIdx);
             }
         }
     }
@@ -393,10 +379,8 @@ public:
         stage3ActiveMask_ = 0U;
     }
 
-    __aicore__ inline void ProcessStage3(uint32_t loopIdx, const ChunkFwdOChunkLoc &loc, int64_t hk, int64_t hv,
-                                         uint32_t localSlot, uint32_t headOffset)
+    __aicore__ inline void ProcessStage3(const ChunkFwdOChunkLoc &loc, uint32_t localSlot, uint32_t headOffset)
     {
-        (void)hk;
         if constexpr (!kEnableStage3Compute) {
             return;
         }
@@ -432,8 +416,6 @@ public:
         SetFlag<HardEvent::V_MTE3>(vToMte3Stream_[streamSlot]);
         WaitFlag<HardEvent::V_MTE3>(vToMte3Stream_[streamSlot]);
 
-        DumpStage3Result(loopIdx, hv, localSlot, aPrimeBf16, oSPrime);
-
         const uint32_t aivCoreIdx = AscendC::GetBlockIdx() / 2U;
         GM_ADDR aPrimeAddr = ChunkFwdOAPrimeGmOffset(workspace_, tiling_, aivCoreIdx, headOffset);
         GlobalTensor<bfloat16_t> aPrimeGm;
@@ -448,43 +430,6 @@ public:
         SetFlag<HardEvent::MTE3_V>(mte3ToVStream_[streamSlot]);
         stage3ActiveMask_ |= 1U << streamSlot;
         stage3StreamSlot_ ^= 1U;
-    }
-
-    __aicore__ inline void DumpStage3Result(uint32_t loopIdx, int64_t hv, uint32_t localSlot,
-                                            LocalTensor<bfloat16_t> &aPrimeBf16, LocalTensor<float> &oSPrime)
-    {
-        if constexpr (!kEnableStage3WorkspaceDump) {
-            return;
-        }
-        if (!ChunkFwdODumpEnabled(tiling_)) {
-            return;
-        }
-        const int64_t slotIdx = ChunkFwdODumpSlotIndex(tiling_, loopIdx, hv);
-        GM_ADDR slotBase = ChunkFwdODumpSlotPtr(workspace_, tiling_, slotIdx);
-        constexpr uint32_t bt = static_cast<uint32_t>(CHUNK_FWD_O_A5_BT);
-        constexpr uint32_t vDim = static_cast<uint32_t>(CHUNK_FWD_O_A5_V);
-        ChunkFwdODumpUbToGm(slotBase, CHUNK_FWD_O_DBG_APRIME_OFF, aPrimeBf16, bt * bt);
-        ChunkFwdODumpUbToGm(slotBase, CHUNK_FWD_O_DBG_OSPRIME_OFF, oSPrime, bt * vDim);
-        (void)localSlot;
-    }
-
-    __aicore__ inline void DumpStage4Result(uint32_t loopIdx, int64_t hv, uint32_t localSlot)
-    {
-        if constexpr (!kEnableStage4WorkspaceDump) {
-            return;
-        }
-        if (!ChunkFwdODumpEnabled(tiling_)) {
-            return;
-        }
-        const int64_t slotIdx = ChunkFwdODumpSlotIndex(tiling_, loopIdx, hv);
-        GM_ADDR slotBase = ChunkFwdODumpSlotPtr(workspace_, tiling_, slotIdx);
-        LocalTensor<float> ol =
-            ubBuf_.GetWithOffset<float>(CHUNK_FWD_O_A5_BT * CHUNK_FWD_O_A5_V, ChunkFwdOOlOffset(localSlot));
-        ChunkFwdODumpUbToGm(
-            slotBase, CHUNK_FWD_O_DBG_OL_OFF, ol,
-            CHUNK_FWD_O_A5_BT * CHUNK_FWD_O_A5_V);
-        SetFlag<HardEvent::MTE3_V>(stage4DumpMte3ToVEvent_);
-        WaitFlag<HardEvent::MTE3_V>(stage4DumpMte3ToVEvent_);
     }
 
     __aicore__ inline void ProcessStage5(const ChunkFwdOChunkLoc &loc, int64_t hv, uint32_t localSlot)
@@ -516,76 +461,7 @@ public:
         DataCopyPad(oGm_[oOffset], oOut, outputCopyParams);
     }
 
-    __aicore__ inline void DumpStage2Workspace(uint32_t loopIdx, int64_t hv, uint32_t localSlot)
-    {
-        if constexpr (!kEnableStage12WorkspaceDump) {
-            return;
-        }
-        DumpStage2ARaw(loopIdx, hv, localSlot);
-        DumpStage2OSRaw(loopIdx, hv, localSlot);
-    }
-
-    __aicore__ inline void DumpStage2ARaw(uint32_t loopIdx, int64_t hv, uint32_t localSlot)
-    {
-        if (!ChunkFwdODumpEnabled(tiling_)) {
-            return;
-        }
-        const int64_t slotIdx = ChunkFwdODumpSlotIndex(tiling_, loopIdx, hv);
-        GM_ADDR slotBase = ChunkFwdODumpSlotPtr(workspace_, tiling_, slotIdx);
-        LocalTensor<float> aRaw =
-            ubBuf_.GetWithOffset<float>(CHUNK_FWD_O_A5_BT * CHUNK_FWD_O_A5_BT, ChunkFwdOARawOffset(localSlot));
-        ChunkFwdODumpUbToGm(
-            slotBase, CHUNK_FWD_O_DBG_ARAW_OFF, aRaw,
-            CHUNK_FWD_O_A5_BT * CHUNK_FWD_O_A5_BT);
-    }
-
-    __aicore__ inline void DumpStage2OSRaw(uint32_t loopIdx, int64_t hv, uint32_t localSlot)
-    {
-        if (!ChunkFwdODumpEnabled(tiling_)) {
-            return;
-        }
-        const int64_t slotIdx = ChunkFwdODumpSlotIndex(tiling_, loopIdx, hv);
-        GM_ADDR slotBase = ChunkFwdODumpSlotPtr(workspace_, tiling_, slotIdx);
-        const uint32_t vDim = static_cast<uint32_t>(CHUNK_FWD_O_A5_V);
-        LocalTensor<float> oSRaw =
-            ubBuf_.GetWithOffset<float>(CHUNK_FWD_O_A5_BT * CHUNK_FWD_O_A5_V, ChunkFwdOOSRawOffset(localSlot));
-        ChunkFwdODumpUbToGm(
-            slotBase, CHUNK_FWD_O_DBG_OSRAW_OFF, oSRaw,
-            CHUNK_FWD_O_A5_BT * CHUNK_FWD_O_A5_V);
-    }
-
-    __aicore__ inline void DumpStage1Result(uint32_t loopIdx, const ChunkFwdOChunkLoc &loc, int64_t hv,
-                                            uint32_t localSlot)
-    {
-        if constexpr (!kEnableStage12WorkspaceDump) {
-            return;
-        }
-        constexpr uint32_t bt = static_cast<uint32_t>(CHUNK_FWD_O_A5_BT);
-        LocalTensor<float> gateO =
-            ubBuf_.GetWithOffset<float>(bt, ChunkFwdOGateOOffset(localSlot));
-        LocalTensor<float> gateA =
-            ubBuf_.GetWithOffset<float>(bt * bt, ChunkFwdOGateAOffset(localSlot));
-        DumpStage1(loc, loopIdx, hv, gateO, gateA);
-    }
-
 private:
-    __aicore__ inline void DumpStage1(const ChunkFwdOChunkLoc &loc, uint32_t loopIdx, int64_t hv,
-                                      LocalTensor<float> &gateO, LocalTensor<float> &gateA)
-    {
-        (void)loc;
-        if ASCEND_IS_AIV {
-            if (ChunkFwdODumpEnabled(tiling_)) {
-                SetFlag<HardEvent::V_MTE3>(vToMte3Event_);
-                WaitFlag<HardEvent::V_MTE3>(vToMte3Event_);
-                const int64_t slotIdx = ChunkFwdODumpSlotIndex(tiling_, loopIdx, hv);
-                GM_ADDR slotBase = ChunkFwdODumpSlotPtr(workspace_, tiling_, slotIdx);
-                const uint32_t bt = static_cast<uint32_t>(CHUNK_FWD_O_A5_BT);
-                ChunkFwdODumpUbToGm(slotBase, CHUNK_FWD_O_DBG_GATE_O_OFF, gateO, bt);
-                ChunkFwdODumpUbToGm(slotBase, CHUNK_FWD_O_DBG_GATE_A_OFF, gateA, bt * bt);
-            }
-        }
-    }
-
     GM_ADDR q_;
     GM_ADDR k_;
     GM_ADDR v_;
@@ -609,7 +485,6 @@ private:
     TEventID mte3ToMte2_[kStreamBankCount];
     TEventID gateReadyEvent_[kLocalSlotCount];
     TEventID vToMte3Event_ = 0;
-    TEventID stage4DumpMte3ToVEvent_ = 0;
     Catlass::Arch::CrossCoreFlag groupReleaseFlag_{CHUNK_FWD_O_VEC_TO_CUBE_RELEASE_FLAG};
     Catlass::Arch::CrossCoreFlag stage1GroupDoneFlag_{CHUNK_FWD_O_S1_GROUP_DONE_FLAG};
 };

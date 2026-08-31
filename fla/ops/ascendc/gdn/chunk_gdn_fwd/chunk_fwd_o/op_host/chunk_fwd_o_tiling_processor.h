@@ -323,20 +323,11 @@ public:
 
     ge::graphStatus WorkspaceTilingA5()
     {
-        // User workspace: debug header + per-(chunk,hv) stage dump slots (development).
-        const size_t headerBytes = static_cast<size_t>(GDN::CHUNK_FWD_O_DBG_HEADER_BYTES);
-        const size_t slotBytes = static_cast<size_t>(GDN::CHUNK_FWD_O_DBG_SLOT_BYTES);
-        const size_t numSlots =
-            static_cast<size_t>(tiling_.chunkNum) * static_cast<size_t>(tiling_.vNumHead);
-        size_t userBytes = headerBytes + numSlots * slotBytes;
-        userBytes = AlignWorkspaceSize(userBytes);
         const size_t aPrimeBytes =
             static_cast<size_t>(ctx_.aicCoreNum) * static_cast<size_t>(GDN::CHUNK_FWD_O_APRIME_WORKSPACE_BYTES);
 
-        tiling_.debugDumpOffset = static_cast<int64_t>(ctx_.sysWorkspaceSize);
-        tiling_.debugDumpSlotBytes = static_cast<int64_t>(slotBytes);
-        tiling_.aPrimeWorkspaceOffset = static_cast<int64_t>(userBytes);
-        workspaceSize_ = ctx_.sysWorkspaceSize + userBytes + aPrimeBytes;
+        tiling_.aPrimeWorkspaceOffset = 0;
+        workspaceSize_ = ctx_.sysWorkspaceSize + aPrimeBytes;
         return ge::GRAPH_SUCCESS;
     }
 
