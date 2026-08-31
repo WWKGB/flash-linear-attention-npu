@@ -3,7 +3,7 @@
  * BSD 3-Clause License.
  *
  * AIC Stage2: L0/L1 ping-pong + Fixpipe→UB (A_raw/O_s_raw FP32, design §354).
- * (WaitStage1Ready / WaitStage2Consumed) follows 59e83dc / PR404 cube side.
+ * Cross-core synchronization follows PR404's two ordered ready chains.
  */
 
 #ifndef CHUNK_FWD_O_ARCH35_CUBE_H
@@ -64,7 +64,8 @@ public:
     static_assert(CHUNK_FWD_O_L1_STAGE4_END <= ArchTag::L1_SIZE,
                   "Stage4 A-prime/V resident slots exceed architecture limit.");
 
-    // L1 resident events: slot0 uses 5/6, slot1 uses 7/8.
+    // Preserve the original per-slot L1 event pairing: slot0 uses 5/6 and
+    // slot1 uses 7/8. These IDs avoid Catlass' lower internal event slots.
     static constexpr TEventID kL1Mte1Mte2Base = 5;
     static constexpr TEventID kL1Mte2Mte1Base = 6;
 
@@ -117,10 +118,7 @@ public:
         PrefetchQKH(loc, hk0, hv0, l1StreamSlot_);
 
         for (int64_t headOffset = 0; headOffset < taskCount; ++headOffset) {
-            if (headOffset >= 2) {
-                WaitStage2Consumed(static_cast<uint32_t>(headOffset - 2));
-            }
-            WaitStage1Ready(static_cast<uint32_t>(headOffset));
+            WaitStage1Ready();
 
             if (headOffset + 1 < taskCount) {
                 const int64_t hvNext = hvBase + headOffset + 1;
@@ -132,29 +130,19 @@ public:
             const int64_t hk = hv / tiling_.hvPerHk;
             const uint32_t ownerSubBlock = static_cast<uint32_t>(headOffset % 2);
             const uint32_t localSlot = static_cast<uint32_t>(headOffset / 2);
-            ProcessStage2Head(loc, hk, hv, ownerSubBlock, localSlot, static_cast<uint32_t>(headOffset),
-                              l1StreamSlot_);
+            ProcessStage2Head(loc, hk, hv, ownerSubBlock, localSlot, l1StreamSlot_);
             l1StreamSlot_ ^= 1U;
         }
     }
 
     __aicore__ inline void WaitStage2GroupRelease()
     {
-        Catlass::Arch::CrossCoreWaitFlag(groupReleaseFlag_);
+        Catlass::Arch::CrossCoreWaitFlag(vecToCubeFlag_);
     }
 
-    __aicore__ inline void WaitStage1Ready(uint32_t headOffset)
+    __aicore__ inline void WaitStage1Ready()
     {
-        Catlass::Arch::CrossCoreFlag flag{
-            static_cast<Catlass::Arch::FlagID>(CHUNK_FWD_O_S1_READY_BASE + headOffset)};
-        Catlass::Arch::CrossCoreWaitFlag(flag);
-    }
-
-    __aicore__ inline void WaitStage2Consumed(uint32_t headOffset)
-    {
-        Catlass::Arch::CrossCoreFlag flag{
-            static_cast<Catlass::Arch::FlagID>(CHUNK_FWD_O_CC_SLOT_RELEASE_BASE + headOffset)};
-        Catlass::Arch::CrossCoreWaitFlag(flag);
+        Catlass::Arch::CrossCoreWaitFlag(vecToCubeFlag_);
     }
 
     __aicore__ inline void ProcessStage4Group(uint32_t loopIdx, const ChunkFwdOChunkLoc &loc, int64_t hvBase,
@@ -169,13 +157,13 @@ public:
         }
 
         l1StreamSlot_ = 0U;
-        WaitStage3Ready(0U);
+        WaitStage3Ready();
         PrefetchStage4(loc, hvBase, 0U, l1StreamSlot_);
 
         for (int64_t headOffset = 0; headOffset < taskCount; ++headOffset) {
             if (headOffset + 1 < taskCount) {
                 const uint32_t nextHeadOffset = static_cast<uint32_t>(headOffset + 1);
-                WaitStage3Ready(nextHeadOffset);
+                WaitStage3Ready();
                 PrefetchStage4(loc, hvBase + headOffset + 1, nextHeadOffset, l1StreamSlot_ ^ 1U);
             }
 
@@ -186,11 +174,9 @@ public:
         }
     }
 
-    __aicore__ inline void WaitStage3Ready(uint32_t headOffset)
+    __aicore__ inline void WaitStage3Ready()
     {
-        Catlass::Arch::CrossCoreFlag flag{
-            static_cast<Catlass::Arch::FlagID>(CHUNK_FWD_O_CC_APRIME_READY_BASE + headOffset)};
-        Catlass::Arch::CrossCoreWaitFlag(flag);
+        Catlass::Arch::CrossCoreWaitFlag(vecToCubeFlag_);
     }
 
 private:
@@ -270,9 +256,7 @@ private:
         SetFlag<HardEvent::MTE1_MTE2>(L1Mte1Mte2Event(l1StreamSlot));
         PublishOl(kBt, ownerSubBlock, localSlot, avCSlot);
 
-        Catlass::Arch::CrossCoreFlag flag{
-            static_cast<Catlass::Arch::FlagID>(CHUNK_FWD_O_CC_OL_READY_BASE + headOffset)};
-        Catlass::Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(flag);
+        Catlass::Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(cubeToVecFlag_);
     }
 
     __aicore__ inline void PrefetchQKH(const ChunkFwdOChunkLoc &loc, int64_t hk, int64_t hv, uint32_t l1StreamSlot)
@@ -322,7 +306,7 @@ private:
     }
 
     __aicore__ inline void ProcessStage2Head(const ChunkFwdOChunkLoc &loc, int64_t hk, int64_t hv,
-                                             uint32_t ownerSubBlock, uint32_t localSlot, uint32_t headOffset,
+                                             uint32_t ownerSubBlock, uint32_t localSlot,
                                              uint32_t l1StreamSlot)
     {
         (void)loc;
@@ -352,9 +336,7 @@ private:
 
         SetFlag<HardEvent::MTE1_MTE2>(L1Mte1Mte2Event(l1StreamSlot));
 
-        Catlass::Arch::CrossCoreFlag flag{
-            static_cast<Catlass::Arch::FlagID>(CHUNK_FWD_O_CC_CUBE_READY_BASE + headOffset)};
-        Catlass::Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(flag);
+        Catlass::Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(cubeToVecFlag_);
     }
 
     template <typename DirectTileCopy, typename TensorL0C>
@@ -561,8 +543,8 @@ private:
     GlobalTensor<Element> kGm_;
     GlobalTensor<Element> vGm_;
     GlobalTensor<Element> hGm_;
-    Catlass::Arch::CrossCoreFlag groupReleaseFlag_{CHUNK_FWD_O_VEC_TO_CUBE_RELEASE_FLAG};
-    Catlass::Arch::CrossCoreFlag stage1GroupDoneFlag_{CHUNK_FWD_O_S1_GROUP_DONE_FLAG};
+    Catlass::Arch::CrossCoreFlag vecToCubeFlag_{CHUNK_FWD_O_VEC_TO_CUBE_READY_FLAG};
+    Catlass::Arch::CrossCoreFlag cubeToVecFlag_{CHUNK_FWD_O_CUBE_TO_VEC_READY_FLAG};
     uint32_t l0ASlot_ = 0U;
     uint32_t l0BSlot_ = 0U;
     uint32_t l0CSlot_ = 0U;

@@ -5,9 +5,10 @@
  * A5 L1<->UB chunk_fwd_o path.
  *
  * Stage1/2: validated (precision passed); do not regress.
- * Stage2 (AIC): L0/L1 streamSlot ping-pong + per-head CrossCore (59e83dc / PR404).
- * Stage3 (AIV): per-head S1→WaitStage2→S3, mode=0x2 pair handshake and
- *   independent A-prime/V-to-MTE3 ping-pong, without SyncAll.
+ * Stage2 (AIC): L0/L1 streamSlot ping-pong + ordered CrossCore ready chains (PR404).
+ * AIV stages run in separate head rounds: S1(all heads), S3(all heads), then S5(all heads).
+ * Stage3 uses mode=0x2 pair handshakes and independent A-prime/V-to-MTE3 ping-pong,
+ *   without a global barrier.
  * Stage4 (AIC): A-prime/V MTE2 prefetch + independent L0 ping-pong + FP32 Fixpipe to owner AIV.
  * Stage5 (AIV): owner fuses O_s-prime/O_l in FP32 and writes bf16 O through MTE3.
  */
@@ -61,7 +62,7 @@ public:
                                                        workspace_);
             vector.Init(tiling_, &pipe);
             if constexpr (kEnableStage1) {
-                RunStage1Aiv(vector, aivCoreIdx, aivCoreNum);
+                RunAivStages(vector, aivCoreIdx, aivCoreNum);
             }
             return;
         }
@@ -76,7 +77,7 @@ public:
     }
 
 private:
-    __aicore__ inline void RunStage1Aiv(ChunkFwdOA5VectorProcess<GT, UseExp2> &vector, uint32_t coreIdx,
+    __aicore__ inline void RunAivStages(ChunkFwdOA5VectorProcess<GT, UseExp2> &vector, uint32_t coreIdx,
                                        uint32_t coreNum)
     {
         ChunkFwdOChunkLoc loc;
@@ -90,43 +91,46 @@ private:
             for (int64_t hvBase = 0; hvBase < tiling_.vNumHead; hvBase += tiling_.taskGroupSize) {
                 const int64_t remaining = tiling_.vNumHead - hvBase;
                 const int64_t taskCount = remaining < tiling_.taskGroupSize ? remaining : tiling_.taskGroupSize;
+
+                // PR404-style stage round: both subblocks walk every headOffset;
+                // only the owner computes, while both participate in mode=0x2.
                 vector.BeginStage1GroupPrefetch(loc, hvBase, taskCount, subBlockIdx);
-                if constexpr (kEnableStage3) {
-                    vector.BeginStage3Group();
-                }
-                // AIV per-head pipeline (PR404 V-side): owner computes; both subblocks
-                // lock-step on headOffset. SignalStage1Ready / SignalStage2Consumed use
-                // mode=0x2 (non-owner participates without compute). No SyncAll.
-                // Finish S3 for head N before S1 reuses localSlot(N+2).
                 for (int64_t headOffset = 0; headOffset < taskCount; ++headOffset) {
                     const uint32_t ownerSubBlock = static_cast<uint32_t>(headOffset % 2);
-                    const uint32_t localSlot = static_cast<uint32_t>(headOffset / 2);
                     if (ownerSubBlock == subBlockIdx) {
                         vector.ProcessStage1Head(loc, hvBase, headOffset, taskCount, subBlockIdx);
                     }
-                    vector.SignalStage1Ready(static_cast<uint32_t>(headOffset));
-                    if constexpr (kEnableStage2) {
-                        vector.WaitStage2Ready(static_cast<uint32_t>(headOffset));
+                    vector.SignalStage1Ready();
+                }
+
+                if constexpr (kEnableStage2) {
+                    if constexpr (kEnableStage3) {
+                        vector.BeginStage3Group();
+                    }
+                    for (int64_t headOffset = 0; headOffset < taskCount; ++headOffset) {
+                        const uint32_t ownerSubBlock = static_cast<uint32_t>(headOffset % 2);
+                        const uint32_t localSlot = static_cast<uint32_t>(headOffset / 2);
+                        vector.WaitStage2Ready();
                         if (ownerSubBlock == subBlockIdx) {
                             if constexpr (kEnableStage3) {
                                 vector.ProcessStage3(loc, localSlot, static_cast<uint32_t>(headOffset));
                             }
                         }
                         if constexpr (kEnableStage4) {
-                            vector.SignalStage3Ready(static_cast<uint32_t>(headOffset));
+                            vector.SignalStage3Ready();
                         }
-                        vector.SignalStage2Consumed(static_cast<uint32_t>(headOffset));
+                    }
+                    if constexpr (kEnableStage3) {
+                        vector.FinishStage3Group();
                     }
                 }
-                if constexpr (kEnableStage3) {
-                    vector.FinishStage3Group();
-                }
+
                 if constexpr (kEnableStage4) {
                     for (int64_t headOffset = 0; headOffset < taskCount; ++headOffset) {
                         const uint32_t ownerSubBlock = static_cast<uint32_t>(headOffset % 2);
                         const uint32_t localSlot = static_cast<uint32_t>(headOffset / 2);
                         const int64_t hv = hvBase + headOffset;
-                        vector.WaitStage4Ready(static_cast<uint32_t>(headOffset));
+                        vector.WaitStage4Ready();
                         if (ownerSubBlock == subBlockIdx) {
                             if constexpr (kEnableStage5) {
                                 vector.ProcessStage5(loc, hv, localSlot);

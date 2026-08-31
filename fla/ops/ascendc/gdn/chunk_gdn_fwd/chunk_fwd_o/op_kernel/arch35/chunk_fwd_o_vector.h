@@ -191,49 +191,29 @@ public:
         vToMte3Event_ = pipe_->AllocEventID<HardEvent::V_MTE3>();
     }
 
-    __aicore__ inline void WaitStage2Ready(uint32_t headOffset)
+    __aicore__ inline void WaitStage2Ready()
     {
-        Catlass::Arch::CrossCoreFlag flag{
-            static_cast<Catlass::Arch::FlagID>(CHUNK_FWD_O_CC_CUBE_READY_BASE + headOffset)};
-        Catlass::Arch::CrossCoreWaitFlag(flag);
+        Catlass::Arch::CrossCoreWaitFlag(cubeToVecFlag_);
     }
 
-    __aicore__ inline void SignalStage3Ready(uint32_t headOffset)
+    __aicore__ inline void SignalStage3Ready()
     {
-        Catlass::Arch::CrossCoreFlag flag{
-            static_cast<Catlass::Arch::FlagID>(CHUNK_FWD_O_CC_APRIME_READY_BASE + headOffset)};
-        Catlass::Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(flag);
+        Catlass::Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecToCubeFlag_);
     }
 
-    __aicore__ inline void WaitStage4Ready(uint32_t headOffset)
+    __aicore__ inline void WaitStage4Ready()
     {
-        Catlass::Arch::CrossCoreFlag flag{
-            static_cast<Catlass::Arch::FlagID>(CHUNK_FWD_O_CC_OL_READY_BASE + headOffset)};
-        Catlass::Arch::CrossCoreWaitFlag(flag);
+        Catlass::Arch::CrossCoreWaitFlag(cubeToVecFlag_);
     }
 
-    __aicore__ inline void SignalStage1Ready(uint32_t headOffset)
+    __aicore__ inline void SignalStage1Ready()
     {
-        Catlass::Arch::CrossCoreFlag flag{
-            static_cast<Catlass::Arch::FlagID>(CHUNK_FWD_O_S1_READY_BASE + headOffset)};
-        Catlass::Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(flag);
+        Catlass::Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecToCubeFlag_);
     }
 
     __aicore__ inline void ReleaseStage2Group()
     {
-        Catlass::Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(groupReleaseFlag_);
-    }
-
-    __aicore__ inline void SignalStage2Consumed(uint32_t headOffset)
-    {
-        Catlass::Arch::CrossCoreFlag flag{
-            static_cast<Catlass::Arch::FlagID>(CHUNK_FWD_O_CC_SLOT_RELEASE_BASE + headOffset)};
-        Catlass::Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(flag);
-    }
-
-    __aicore__ inline void SignalStage1GroupDone()
-    {
-        Catlass::Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(stage1GroupDoneFlag_);
+        Catlass::Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecToCubeFlag_);
     }
 
     __aicore__ inline void SignalGateReady(uint32_t localSlot)
@@ -485,8 +465,8 @@ private:
     TEventID mte3ToMte2_[kStreamBankCount];
     TEventID gateReadyEvent_[kLocalSlotCount];
     TEventID vToMte3Event_ = 0;
-    Catlass::Arch::CrossCoreFlag groupReleaseFlag_{CHUNK_FWD_O_VEC_TO_CUBE_RELEASE_FLAG};
-    Catlass::Arch::CrossCoreFlag stage1GroupDoneFlag_{CHUNK_FWD_O_S1_GROUP_DONE_FLAG};
+    Catlass::Arch::CrossCoreFlag vecToCubeFlag_{CHUNK_FWD_O_VEC_TO_CUBE_READY_FLAG};
+    Catlass::Arch::CrossCoreFlag cubeToVecFlag_{CHUNK_FWD_O_CUBE_TO_VEC_READY_FLAG};
 };
 
 } // namespace GDN

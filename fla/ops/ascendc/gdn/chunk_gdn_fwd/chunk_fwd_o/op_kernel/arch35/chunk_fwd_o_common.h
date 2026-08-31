@@ -153,14 +153,10 @@ __aicore__ inline uint32_t ChunkFwdOL0COffset(uint32_t slot)
     return slot * CHUNK_FWD_O_L0_C_BYTES;
 }
 
-constexpr uint64_t CHUNK_FWD_O_VEC_TO_CUBE_RELEASE_FLAG = 1;
-constexpr uint64_t CHUNK_FWD_O_S1_GROUP_DONE_FLAG = 2;
-constexpr uint64_t CHUNK_FWD_O_S1_READY_BASE = 4;
-
-constexpr uint32_t CHUNK_FWD_O_CC_CUBE_READY_BASE = 8;
-constexpr uint32_t CHUNK_FWD_O_CC_APRIME_READY_BASE = 12;
-constexpr uint32_t CHUNK_FWD_O_CC_OL_READY_BASE = 16;
-constexpr uint32_t CHUNK_FWD_O_CC_SLOT_RELEASE_BASE = 20;
+// PR404-style ordered chains. Both sides walk every stage round in the same
+// head order, so one fixed flag per direction is sufficient.
+constexpr uint64_t CHUNK_FWD_O_VEC_TO_CUBE_READY_FLAG = 1;
+constexpr uint64_t CHUNK_FWD_O_CUBE_TO_VEC_READY_FLAG = 3;
 
 __aicore__ inline int64_t ChunkFwdOSyncIdx(int64_t chunkIdx)
 {
