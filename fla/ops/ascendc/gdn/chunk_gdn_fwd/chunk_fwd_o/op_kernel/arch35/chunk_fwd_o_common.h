@@ -225,6 +225,12 @@ __aicore__ inline int64_t ChunkFwdOVOOffset(const ChunkFwdOTilingData &tiling, c
     return (row * tiling.seqlen + static_cast<int64_t>(loc.tokenStart)) * tiling.vHeadDim;
 }
 
+__aicore__ inline int64_t ChunkFwdOOOffset(const ChunkFwdOTilingData &tiling, const ChunkFwdOChunkLoc &loc,
+                                           int64_t hv)
+{
+    return ChunkFwdOVOOffset(tiling, loc, hv);
+}
+
 __aicore__ inline int64_t ChunkFwdOGOffset(const ChunkFwdOTilingData &tiling, const ChunkFwdOChunkLoc &loc,
                                            int64_t hv)
 {

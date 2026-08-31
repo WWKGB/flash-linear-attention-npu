@@ -128,6 +128,31 @@ __simd_vf__ inline void Stage3Gate64VF(__ubuf__ bfloat16_t *aPrimeAddr, __ubuf__
     }
 }
 
+__simd_vf__ inline void Stage5Fuse64VF(__ubuf__ bfloat16_t *oOutAddr, __ubuf__ float *oSPrimeAddr,
+                                       __ubuf__ float *oLAddr, float scale, uint16_t validRows)
+{
+    constexpr uint16_t kV = static_cast<uint16_t>(CHUNK_FWD_O_A5_V);
+    constexpr uint16_t kTilesPerRow = static_cast<uint16_t>(CHUNK_FWD_O_A5_V / CHUNK_FWD_O_A5_BT);
+    RegTensor<float> oSPrimeReg;
+    RegTensor<float> oLReg;
+    RegTensor<float> oOutReg;
+    RegTensor<bfloat16_t> oOutBf16Reg;
+    MaskReg floatMask = CreateMask<float, MaskPattern::ALL>();
+
+    for (uint16_t row = 0; row < validRows; ++row) {
+        for (uint16_t tile = 0; tile < kTilesPerRow; ++tile) {
+            const uint32_t offset = static_cast<uint32_t>(row) * kV +
+                                    static_cast<uint32_t>(tile) * CHUNK_FWD_O_A5_BT;
+            LoadAlign(oSPrimeReg, oSPrimeAddr + offset);
+            LoadAlign(oLReg, oLAddr + offset);
+            Add(oOutReg, oSPrimeReg, oLReg, floatMask);
+            Muls(oOutReg, oOutReg, scale, floatMask);
+            Cast<bfloat16_t, float, CHUNK_FWD_O_FP32_TO_B16_PACK>(oOutBf16Reg, oOutReg, floatMask);
+            StoreAlign<bfloat16_t, StoreDist::DIST_PACK_B32>(oOutAddr + offset, oOutBf16Reg, floatMask);
+        }
+    }
+}
+
 template <typename GT, bool UseExp2>
 class ChunkFwdOA5VectorProcess {
 public:
@@ -153,6 +178,7 @@ public:
     {
         tiling_ = tiling;
         pipe_ = pipe;
+        oGm_.SetGlobalBuffer((__gm__ bfloat16_t *)o_);
 
         pipe_->InitBuffer(ubBuf_, CHUNK_FWD_O_UB_TOTAL_BYTES);
         for (uint32_t bankIdx = 0; bankIdx < kStreamBankCount; ++bankIdx) {
@@ -168,6 +194,7 @@ public:
             gateReadyEvent_[slotIdx] = pipe_->AllocEventID<HardEvent::V_MTE2>();
         }
         vToMte3Event_ = pipe_->AllocEventID<HardEvent::V_MTE3>();
+        stage4DumpMte3ToVEvent_ = pipe_->AllocEventID<HardEvent::MTE3_V>();
     }
 
     __aicore__ inline void ProcessInit()
@@ -456,6 +483,33 @@ public:
         ChunkFwdODumpUbToGm(
             slotBase, CHUNK_FWD_O_DBG_OL_OFF, ol,
             CHUNK_FWD_O_A5_BT * CHUNK_FWD_O_A5_V);
+        SetFlag<HardEvent::MTE3_V>(stage4DumpMte3ToVEvent_);
+        WaitFlag<HardEvent::MTE3_V>(stage4DumpMte3ToVEvent_);
+    }
+
+    __aicore__ inline void ProcessStage5(const ChunkFwdOChunkLoc &loc, int64_t hv, uint32_t localSlot)
+    {
+        constexpr uint32_t bt = static_cast<uint32_t>(CHUNK_FWD_O_A5_BT);
+        constexpr uint32_t vDim = static_cast<uint32_t>(CHUNK_FWD_O_A5_V);
+        LocalTensor<float> oSPrime =
+            ubBuf_.GetWithOffset<float>(bt * vDim, ChunkFwdOOsPrimeOffset(localSlot));
+        LocalTensor<float> oL = ubBuf_.GetWithOffset<float>(bt * vDim, ChunkFwdOOlOffset(localSlot));
+        LocalTensor<bfloat16_t> oOut =
+            ubBuf_.GetWithOffset<bfloat16_t>(bt * vDim, ChunkFwdOOlOffset(localSlot));
+
+        AscendC::VF_CALL<Stage5Fuse64VF>(
+            reinterpret_cast<__ubuf__ bfloat16_t *>(oOut.GetPhyAddr()),
+            reinterpret_cast<__ubuf__ float *>(oSPrime.GetPhyAddr()),
+            reinterpret_cast<__ubuf__ float *>(oL.GetPhyAddr()), tiling_.scale,
+            static_cast<uint16_t>(loc.chunkLen));
+        PipeBarrier<PIPE_V>();
+
+        SetFlag<HardEvent::V_MTE3>(vToMte3Event_);
+        WaitFlag<HardEvent::V_MTE3>(vToMte3Event_);
+        const int64_t oOffset = ChunkFwdOOOffset(tiling_, loc, hv);
+        DataCopyExtParams outputCopyParams{
+            1, static_cast<uint32_t>(loc.chunkLen * vDim * sizeof(bfloat16_t)), 0, 0, 0};
+        DataCopyPad(oGm_[oOffset], oOut, outputCopyParams);
     }
 
     __aicore__ inline void DumpStage2Workspace(uint32_t loopIdx, int64_t hv, uint32_t localSlot)
@@ -541,6 +595,7 @@ private:
     TPipe *pipe_ = nullptr;
 
     TBuf<TPosition::VECCALC> ubBuf_;
+    GlobalTensor<bfloat16_t> oGm_;
     uint32_t streamSlot_ = 0;
     uint32_t stage3StreamSlot_ = 0;
     uint32_t stage3ActiveMask_ = 0;
@@ -550,6 +605,7 @@ private:
     TEventID mte3ToMte2_[kStreamBankCount];
     TEventID gateReadyEvent_[kLocalSlotCount];
     TEventID vToMte3Event_ = 0;
+    TEventID stage4DumpMte3ToVEvent_ = 0;
     Catlass::Arch::CrossCoreFlag groupReleaseFlag_{CHUNK_FWD_O_VEC_TO_CUBE_RELEASE_FLAG};
     Catlass::Arch::CrossCoreFlag stage1GroupDoneFlag_{CHUNK_FWD_O_S1_GROUP_DONE_FLAG};
 };

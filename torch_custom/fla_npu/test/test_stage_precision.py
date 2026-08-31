@@ -43,7 +43,7 @@ DBG_MAGIC = 0xCF0DA5
 BT = 64
 K = 128
 V = 128
-CHECK_STAGE45 = False
+CHECK_STAGE5 = False
 CHECK_STAGE4 = False
 CHECK_STAGE3 = True
 CHECK_STAGE2 = True
@@ -298,7 +298,7 @@ def _find_user_workspace(ws_np: np.ndarray) -> tuple[int, np.ndarray]:
 
 def run_case(*, seqlen=64, heads=None, hk=None, hv=None, use_exp2: bool = False, seed: int = 0,
              stage1_only: bool = False, stage3_only: bool = False, stage4_only: bool = False,
-             transport_only: bool = False):
+             stage5_only: bool = False, transport_only: bool = False):
     torch.manual_seed(seed)
     np.random.seed(seed)
 
@@ -315,10 +315,10 @@ def run_case(*, seqlen=64, heads=None, hk=None, hv=None, use_exp2: bool = False,
         raise ValueError(f"G=HV/HK must be in [1,4], got {g_ratio}")
 
     B, HK, HV = 1, hk, hv
-    check_stage2 = CHECK_STAGE2 and not stage1_only and not stage3_only and not stage4_only
-    check_stage3 = CHECK_STAGE3 and not stage1_only and not stage4_only
-    check_stage4 = CHECK_STAGE4 and not stage1_only and not stage3_only
-    check_stage45 = CHECK_STAGE45 and not stage1_only and not stage3_only
+    check_stage2 = CHECK_STAGE2 and not stage1_only and not stage3_only and not stage4_only and not stage5_only
+    check_stage3 = CHECK_STAGE3 and not stage1_only and not stage4_only and not stage5_only
+    check_stage4 = CHECK_STAGE4 and not stage1_only and not stage3_only and not stage5_only
+    check_stage5 = CHECK_STAGE5 and not stage1_only and not stage3_only and not stage4_only
     scale = K ** -0.5
     chunk_size = 64
     num_chunks = (seqlen + chunk_size - 1) // chunk_size
@@ -372,7 +372,7 @@ def run_case(*, seqlen=64, heads=None, hk=None, hv=None, use_exp2: bool = False,
             refs[(chunk_idx, hv)] = ref
             dumps[(chunk_idx, hv)] = dump
             tag = f"c{chunk_idx}/h{hv}"
-            if not stage3_only and not stage4_only:
+            if not stage3_only and not stage4_only and not stage5_only:
                 ok &= _compare(f"gate_o[{tag}]", ref["gate_o"], dump["gate_o"], atol=1e-3, rtol=1e-2)
                 ok &= _compare(f"gate_A[{tag}]", ref["gate_A"], dump["gate_A"], atol=1e-2, rtol=1e-2)
             if check_stage2:
@@ -416,22 +416,17 @@ def run_case(*, seqlen=64, heads=None, hk=None, hv=None, use_exp2: bool = False,
                     atol=0.35,
                     rtol=0.05,
                 )
-            if check_stage45:
+            if check_stage5:
                 out_chunk = out[0, hv, token_begin : token_begin + chunk_len].cpu().float().numpy()
-                o_l_from_out = out_chunk[:chunk_len] / scale - dump["O_s_prime"][:chunk_len]
+                o_from_dump = (
+                    (torch.from_numpy(dump["O_s_prime"]) + torch.from_numpy(dump["O_l"])) * scale
+                ).to(torch.bfloat16).float().numpy()
                 ok &= _compare(
-                    f"O_l[{tag}]",
-                    ref["O_l"][:chunk_len],
-                    o_l_from_out[:chunk_len],
-                    atol=0.35,
-                    rtol=0.05,
-                )
-                ok &= _compare(
-                    f"O[{tag}]",
-                    ref["O"][:chunk_len],
+                    f"O_stage5[{tag}]",
+                    o_from_dump[:chunk_len],
                     out_chunk[:chunk_len],
-                    atol=0.1,
-                    rtol=0.02,
+                    atol=0.01,
+                    rtol=0.01,
                 )
     if not ok and check_stage2 and HV >= 2:
         for chunk_idx in range(num_chunks):
@@ -486,6 +481,7 @@ def _run_case_with_timeout(
     stage1_only: bool = False,
     stage3_only: bool = False,
     stage4_only: bool = False,
+    stage5_only: bool = False,
     transport_only: bool = False,
 ) -> bool:
     case_kwargs = dict(kwargs)
@@ -495,6 +491,8 @@ def _run_case_with_timeout(
         case_kwargs["stage3_only"] = True
     if stage4_only:
         case_kwargs["stage4_only"] = True
+    if stage5_only:
+        case_kwargs["stage5_only"] = True
     if transport_only:
         case_kwargs["transport_only"] = True
     payload = json.dumps({"name": name, **case_kwargs})
@@ -505,6 +503,8 @@ def _run_case_with_timeout(
         cmd.append("--stage3-only")
     if stage4_only:
         cmd.append("--stage4-only")
+    if stage5_only:
+        cmd.append("--stage5-only")
     if transport_only:
         cmd.append("--transport")
     try:
@@ -567,6 +567,11 @@ def main():
         help="Only check O_l (S4 workspace dump; requires --precision).",
     )
     parser.add_argument(
+        "--stage5-only",
+        action="store_true",
+        help="Only check final O against the dumped S5 inputs (requires --precision).",
+    )
+    parser.add_argument(
         "--transport",
         action="store_true",
         help="Kernel launch + NPU sync only.",
@@ -577,22 +582,27 @@ def main():
         help="Workspace-dump Stage1/2 precision regression.",
     )
     args = parser.parse_args()
-    global CHECK_STAGE2, CHECK_STAGE3, CHECK_STAGE4, CHECK_STAGE45
+    global CHECK_STAGE2, CHECK_STAGE3, CHECK_STAGE4, CHECK_STAGE5
     if args.stage1_only:
         CHECK_STAGE2 = False
         CHECK_STAGE3 = False
         CHECK_STAGE4 = False
-        CHECK_STAGE45 = False
+        CHECK_STAGE5 = False
     if args.stage3_only:
         CHECK_STAGE2 = False
         CHECK_STAGE3 = True
         CHECK_STAGE4 = False
-        CHECK_STAGE45 = False
+        CHECK_STAGE5 = False
     if args.stage4_only:
         CHECK_STAGE2 = False
         CHECK_STAGE3 = False
         CHECK_STAGE4 = True
-        CHECK_STAGE45 = False
+        CHECK_STAGE5 = False
+    if args.stage5_only:
+        CHECK_STAGE2 = False
+        CHECK_STAGE3 = False
+        CHECK_STAGE4 = False
+        CHECK_STAGE5 = True
     if args.single_json is not None:
         sys.exit(_run_single_from_json(args.single_json))
 
@@ -624,6 +634,7 @@ def main():
                 stage1_only=args.stage1_only,
                 stage3_only=args.stage3_only,
                 stage4_only=args.stage4_only,
+                stage5_only=args.stage5_only,
                 transport_only=transport_only,
             ):
                 failed.append(name)

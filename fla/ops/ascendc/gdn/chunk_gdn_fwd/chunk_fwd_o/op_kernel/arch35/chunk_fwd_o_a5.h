@@ -9,6 +9,7 @@
  * Stage3 (AIV): per-head S1→WaitStage2→S3, mode=0x2 pair handshake and
  *   independent A-prime/V-to-MTE3 ping-pong, without SyncAll.
  * Stage4 (AIC): A-prime/V MTE2 prefetch + independent L0 ping-pong + FP32 Fixpipe to owner AIV.
+ * Stage5 (AIV): owner fuses O_s-prime/O_l in FP32 and writes bf16 O through MTE3.
  */
 
 #ifndef CHUNK_FWD_O_ARCH35_A5_H
@@ -29,6 +30,7 @@ public:
     static constexpr bool kEnableStage2 = true;
     static constexpr bool kEnableStage3 = true;
     static constexpr bool kEnableStage4 = true;
+    static constexpr bool kEnableStage5 = true;
 
     __aicore__ inline void Init(GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR h, GM_ADDR g, GM_ADDR cuSeqlens,
                                 GM_ADDR chunkOffsets, GM_ADDR o, GM_ADDR workspace,
@@ -133,6 +135,9 @@ private:
                         vector.WaitStage4Ready(static_cast<uint32_t>(headOffset));
                         if (ownerSubBlock == subBlockIdx) {
                             vector.DumpStage4Result(loopIdx, hv, localSlot);
+                            if constexpr (kEnableStage5) {
+                                vector.ProcessStage5(loc, hv, localSlot);
+                            }
                         }
                     }
                 }
