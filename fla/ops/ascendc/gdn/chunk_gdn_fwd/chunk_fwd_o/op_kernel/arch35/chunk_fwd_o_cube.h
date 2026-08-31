@@ -2,7 +2,7 @@
  * Copyright (c) 2026 Tianjin University, Ltd.
  * BSD 3-Clause License.
  *
- * AIC Stage2: L0/L1 ping-pong + Fixpipe→UB. CrossCore per-head handshake
+ * AIC Stage2: L0/L1 ping-pong + Fixpipe→UB (A_raw/O_s_raw FP32, design §354).
  * (WaitStage1Ready / WaitStage2Consumed) follows 59e83dc / PR404 cube side.
  */
 
@@ -39,6 +39,8 @@ public:
                                                               LayoutRM>;
     using TileCopyQH = Catlass::Gemm::Tile::PackedTileCopyTla<ArchTag, Element, LayoutRM, Element, LayoutCM, Element,
                                                               LayoutRM>;
+    using TileCopyAV = Catlass::Gemm::Tile::PackedTileCopyTla<ArchTag, Element, LayoutRM, Element, LayoutRM, Element,
+                                                              LayoutRM>;
     using DirectTileCopyCC = Common::Tile::PackedTileCopyTlaToUB<
         ArchTag, Element, LayoutRM, Element, LayoutCM, float, LayoutRM, void,
         Catlass::Gemm::Tile::CopyL0CToUBMode::NO_SPLIT>;
@@ -59,6 +61,8 @@ public:
                   "Stage2 L0C ping/pong exceeds architecture limit.");
     static_assert(CHUNK_FWD_O_L1_STREAM_BANK_BYTES * kL1StreamBankCount <= ArchTag::L1_SIZE,
                   "Stage2 L1 stream banks exceed architecture limit.");
+    static_assert(CHUNK_FWD_O_L1_STAGE4_END <= ArchTag::L1_SIZE,
+                  "Stage4 A-prime/V resident slots exceed architecture limit.");
 
     // L1 resident events: slot0 uses 5/6, slot1 uses 7/8.
     static constexpr TEventID kL1Mte1Mte2Base = 5;
@@ -77,6 +81,7 @@ public:
         tiling_ = tiling;
         qGm_.SetGlobalBuffer((__gm__ Element *)q_);
         kGm_.SetGlobalBuffer((__gm__ Element *)k_);
+        vGm_.SetGlobalBuffer((__gm__ Element *)v_);
         hGm_.SetGlobalBuffer((__gm__ Element *)h_);
         if ASCEND_IS_AIC {
             SetLoadDataPaddingValue<Element>(static_cast<Element>(0));
@@ -152,12 +157,40 @@ public:
         Catlass::Arch::CrossCoreWaitFlag(flag);
     }
 
-    __aicore__ inline void ProcessStage4(uint32_t loopIdx, const ChunkFwdOChunkLoc &loc, int64_t hk, int64_t hv)
+    __aicore__ inline void ProcessStage4Group(uint32_t loopIdx, const ChunkFwdOChunkLoc &loc, int64_t hvBase,
+                                              int64_t taskCount)
     {
+        if ASCEND_IS_AIV {
+            return;
+        }
         (void)loopIdx;
-        (void)loc;
-        (void)hk;
-        (void)hv;
+        if (taskCount <= 0) {
+            return;
+        }
+
+        l1StreamSlot_ = 0U;
+        WaitStage3Ready(0U);
+        PrefetchStage4(loc, hvBase, 0U, l1StreamSlot_);
+
+        for (int64_t headOffset = 0; headOffset < taskCount; ++headOffset) {
+            if (headOffset + 1 < taskCount) {
+                const uint32_t nextHeadOffset = static_cast<uint32_t>(headOffset + 1);
+                WaitStage3Ready(nextHeadOffset);
+                PrefetchStage4(loc, hvBase + headOffset + 1, nextHeadOffset, l1StreamSlot_ ^ 1U);
+            }
+
+            const uint32_t ownerSubBlock = static_cast<uint32_t>(headOffset % 2);
+            const uint32_t localSlot = static_cast<uint32_t>(headOffset / 2);
+            ProcessStage4Head(ownerSubBlock, localSlot, static_cast<uint32_t>(headOffset), l1StreamSlot_);
+            l1StreamSlot_ ^= 1U;
+        }
+    }
+
+    __aicore__ inline void WaitStage3Ready(uint32_t headOffset)
+    {
+        Catlass::Arch::CrossCoreFlag flag{
+            static_cast<Catlass::Arch::FlagID>(CHUNK_FWD_O_CC_APRIME_READY_BASE + headOffset)};
+        Catlass::Arch::CrossCoreWaitFlag(flag);
     }
 
 private:
@@ -179,6 +212,67 @@ private:
     static constexpr TEventID L1Mte2Mte1Event(uint32_t slot)
     {
         return static_cast<TEventID>(kL1Mte2Mte1Base + slot * 2U);
+    }
+
+    __aicore__ inline void PrefetchStage4(const ChunkFwdOChunkLoc &loc, int64_t hv, uint32_t headOffset,
+                                          uint32_t l1StreamSlot)
+    {
+        const uint32_t m = kBt;
+        const uint32_t coreIdx = AscendC::GetBlockIdx();
+        const int64_t vOffset = ChunkFwdOVOOffset(tiling_, loc, hv);
+
+        WaitFlag<HardEvent::MTE1_MTE2>(L1Mte1Mte2Event(l1StreamSlot));
+
+        GlobalTensor<Element> aPrimeGm;
+        aPrimeGm.SetGlobalBuffer(reinterpret_cast<__gm__ Element *>(
+            ChunkFwdOAPrimeGmOffset(workspace_, tiling_, coreIdx, headOffset)));
+        auto layoutAPrimeGm = tla::MakeLayout<Element, LayoutRM>(m, m);
+        auto layoutVGm = tla::MakeLayout<Element, LayoutRM>(m, kV);
+        auto tensorAPrimeGm = tla::MakeTensor(aPrimeGm, layoutAPrimeGm, Catlass::Arch::PositionGM{});
+        auto tensorVGm = tla::MakeTensor(vGm_[vOffset], layoutVGm, Catlass::Arch::PositionGM{});
+        auto blockAPrime = GetTile(tensorAPrimeGm, tla::MakeCoord(0, 0), tla::MakeShape(m, m));
+        auto blockV = GetTile(
+            tensorVGm, tla::MakeCoord(0, 0),
+            tla::MakeShape(static_cast<uint32_t>(loc.chunkLen), kV));
+
+        using LayoutTagL1A = typename TileCopyAV::LayoutTagL1A;
+        using LayoutTagL1B = typename TileCopyAV::LayoutTagL1B;
+        using CopyGmToL1A = typename TileCopyAV::template CopyGmToL1A<decltype(blockAPrime)>;
+        using CopyGmToL1B = typename TileCopyAV::template CopyGmToL1B<decltype(blockV)>;
+
+        LocalTensor<Element> l1APrime =
+            resource_.l1Buf.template GetBufferByByte<Element>(ChunkFwdOL1APrimeOffset(headOffset));
+        LocalTensor<Element> l1V =
+            resource_.l1Buf.template GetBufferByByte<Element>(ChunkFwdOL1VOffset(headOffset));
+        auto layoutL1APrime = tla::MakeLayout<Element, LayoutTagL1A>(m, m);
+        auto layoutL1V = tla::MakeLayout<Element, LayoutTagL1B>(m, kV);
+        auto tensorL1APrime = tla::MakeTensor(l1APrime, layoutL1APrime, Catlass::Arch::PositionL1{});
+        auto tensorL1V = tla::MakeTensor(l1V, layoutL1V, Catlass::Arch::PositionL1{});
+
+        CopyGmToL1A{}(tensorL1APrime, blockAPrime);
+        CopyGmToL1B{}(tensorL1V, blockV);
+        SetFlag<HardEvent::MTE2_MTE1>(L1Mte2Mte1Event(l1StreamSlot));
+    }
+
+    __aicore__ inline void ProcessStage4Head(uint32_t ownerSubBlock, uint32_t localSlot, uint32_t headOffset,
+                                             uint32_t l1StreamSlot)
+    {
+        WaitFlag<HardEvent::MTE2_MTE1>(L1Mte2Mte1Event(l1StreamSlot));
+
+        const uint32_t avASlot = l0ASlot_;
+        const uint32_t avBSlot = l0BSlot_;
+        const uint32_t avCSlot = l0CSlot_;
+        l0ASlot_ ^= 1U;
+        l0BSlot_ ^= 1U;
+        l0CSlot_ ^= 1U;
+
+        RunGemmAV(kBt, headOffset, avASlot, avBSlot, avCSlot);
+        SetFlag<HardEvent::MTE1_MTE2>(L1Mte1Mte2Event(l1StreamSlot));
+        PublishOl(kBt, ownerSubBlock, localSlot, avCSlot);
+
+        Catlass::Arch::CrossCoreFlag flag{
+            static_cast<Catlass::Arch::FlagID>(CHUNK_FWD_O_CC_OL_READY_BASE + headOffset)};
+        Catlass::Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(flag);
     }
 
     __aicore__ inline void PrefetchQKH(const ChunkFwdOChunkLoc &loc, int64_t hk, int64_t hv, uint32_t l1StreamSlot)
@@ -298,6 +392,15 @@ private:
         PublishDirectTile<DirectTileCopyRM>(qhTile, m, kV, ChunkFwdOOSRawOffset(localSlot), ownerSubBlock, l0CSlot);
     }
 
+    __aicore__ inline void PublishOl(uint32_t m, uint32_t ownerSubBlock, uint32_t localSlot, uint32_t l0CSlot)
+    {
+        LocalTensor<float> olL0C = resource_.l0CBuf.template GetBufferByByte<float>(ChunkFwdOL0COffset(l0CSlot));
+        auto olLayout = tla::MakeLayoutL0C(m, kV);
+        auto olTensor = tla::MakeTensor(olL0C, olLayout, Catlass::Arch::PositionL0C{});
+        auto olTile = GetTile(olTensor, tla::MakeCoord(0, 0), tla::MakeShape(m, kV));
+        PublishDirectTile<DirectTileCopyRM>(olTile, m, kV, ChunkFwdOOlOffset(localSlot), ownerSubBlock, l0CSlot);
+    }
+
     __aicore__ inline void RunGemmQKT(uint32_t m, uint32_t l1StreamSlot, uint32_t l0ASlot, uint32_t l0BSlot,
                                       uint32_t l0CSlot)
     {
@@ -393,6 +496,56 @@ private:
         SetFlag<HardEvent::M_MTE1>(L0BEvent(l0BSlot));
     }
 
+    __aicore__ inline void RunGemmAV(uint32_t m, uint32_t headOffset, uint32_t l0ASlot, uint32_t l0BSlot,
+                                     uint32_t l0CSlot)
+    {
+        using LayoutTagL1A = typename TileCopyAV::LayoutTagL1A;
+        using LayoutTagL1B = typename TileCopyAV::LayoutTagL1B;
+        using LayoutTagL0A = typename TileCopyAV::LayoutTagL0A;
+        using LayoutTagL0B = typename TileCopyAV::LayoutTagL0B;
+        using CopyL1ToL0A = typename TileCopyAV::CopyL1ToL0A;
+        using CopyL1ToL0B = typename TileCopyAV::CopyL1ToL0B;
+        using TileMmad = Catlass::Gemm::Tile::TileMmadTla<ArchTag, Element, LayoutTagL1A>;
+
+        LocalTensor<Element> l1APrime =
+            resource_.l1Buf.template GetBufferByByte<Element>(ChunkFwdOL1APrimeOffset(headOffset));
+        LocalTensor<Element> l1V =
+            resource_.l1Buf.template GetBufferByByte<Element>(ChunkFwdOL1VOffset(headOffset));
+        LocalTensor<Element> l0A =
+            resource_.l0ABuf.template GetBufferByByte<Element>(ChunkFwdOL0AOffset(l0ASlot));
+        LocalTensor<Element> l0B =
+            resource_.l0BBuf.template GetBufferByByte<Element>(ChunkFwdOL0BOffset(l0BSlot));
+        LocalTensor<float> l0C = resource_.l0CBuf.template GetBufferByByte<float>(ChunkFwdOL0COffset(l0CSlot));
+
+        auto layoutL1APrime = tla::MakeLayout<Element, LayoutTagL1A>(m, m);
+        auto layoutL1V = tla::MakeLayout<Element, LayoutTagL1B>(m, kV);
+        auto layoutL0A = tla::MakeLayout<Element, LayoutTagL0A>(m, m);
+        auto layoutL0B = tla::MakeLayout<Element, LayoutTagL0B>(m, kV);
+        auto layoutL0C = tla::MakeLayoutL0C(m, kV);
+        auto tensorL1APrime = tla::MakeTensor(l1APrime, layoutL1APrime, Catlass::Arch::PositionL1{});
+        auto tensorL1V = tla::MakeTensor(l1V, layoutL1V, Catlass::Arch::PositionL1{});
+        auto tensorL0A = tla::MakeTensor(l0A, layoutL0A, Catlass::Arch::PositionL0A{});
+        auto tensorL0B = tla::MakeTensor(l0B, layoutL0B, Catlass::Arch::PositionL0B{});
+        auto tensorL0C = tla::MakeTensor(l0C, layoutL0C, Catlass::Arch::PositionL0C{});
+        auto tileL1APrime = GetTile(tensorL1APrime, tla::MakeCoord(0, 0), tla::MakeShape(m, m));
+        auto tileL1V = GetTile(tensorL1V, tla::MakeCoord(0, 0), tla::MakeShape(m, kV));
+        auto tileL0A = GetTile(tensorL0A, tla::MakeCoord(0, 0), tla::MakeShape(m, m));
+        auto tileL0B = GetTile(tensorL0B, tla::MakeCoord(0, 0), tla::MakeShape(m, kV));
+        auto tileL0C = GetTile(tensorL0C, tla::MakeCoord(0, 0), tla::MakeShape(m, kV));
+
+        WaitFlag<HardEvent::M_MTE1>(L0AEvent(l0ASlot));
+        WaitFlag<HardEvent::M_MTE1>(L0BEvent(l0BSlot));
+        WaitFlag<HardEvent::FIX_M>(l0CSlot);
+        CopyL1ToL0A{}(tileL0A, tileL1APrime);
+        CopyL1ToL0B{}(tileL0B, tileL1V);
+        SetFlag<HardEvent::MTE1_M>(l0CSlot);
+        WaitFlag<HardEvent::MTE1_M>(l0CSlot);
+        TileMmad{}(tileL0C, tileL0A, tileL0B, m, kV, m, true, 0);
+        PipeBarrier<PIPE_M>();
+        SetFlag<HardEvent::M_MTE1>(L0AEvent(l0ASlot));
+        SetFlag<HardEvent::M_MTE1>(L0BEvent(l0BSlot));
+    }
+
     GM_ADDR q_;
     GM_ADDR k_;
     GM_ADDR v_;
@@ -406,6 +559,7 @@ private:
     Catlass::Arch::Resource<ArchTag> resource_;
     GlobalTensor<Element> qGm_;
     GlobalTensor<Element> kGm_;
+    GlobalTensor<Element> vGm_;
     GlobalTensor<Element> hGm_;
     Catlass::Arch::CrossCoreFlag groupReleaseFlag_{CHUNK_FWD_O_VEC_TO_CUBE_RELEASE_FLAG};
     Catlass::Arch::CrossCoreFlag stage1GroupDoneFlag_{CHUNK_FWD_O_S1_GROUP_DONE_FLAG};

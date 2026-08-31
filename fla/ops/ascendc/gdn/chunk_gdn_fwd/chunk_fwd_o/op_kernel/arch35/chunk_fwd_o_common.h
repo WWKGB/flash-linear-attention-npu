@@ -97,6 +97,11 @@ constexpr uint32_t CHUNK_FWD_O_L1_Q_BASE = 0U;
 constexpr uint32_t CHUNK_FWD_O_L1_K_BASE = 64U * 1024U;
 constexpr uint32_t CHUNK_FWD_O_L1_H_BASE = 128U * 1024U;
 constexpr uint32_t CHUNK_FWD_O_L1_STREAM_BANK_BYTES = 256U * 1024U;
+constexpr uint32_t CHUNK_FWD_O_L1_APRIME_BASE = 256U * 1024U;
+constexpr uint32_t CHUNK_FWD_O_L1_APRIME_SLOT_BYTES = CHUNK_FWD_O_APRIME_SLOT_BYTES;
+constexpr uint32_t CHUNK_FWD_O_L1_V_BASE = 288U * 1024U;
+constexpr uint32_t CHUNK_FWD_O_L1_V_SLOT_BYTES = 16U * 1024U;
+constexpr uint32_t CHUNK_FWD_O_L1_STAGE4_END = 352U * 1024U;
 
 constexpr uint32_t CHUNK_FWD_O_L0_BUFFER_COUNT = 2U;
 constexpr uint32_t CHUNK_FWD_O_L0_A_BYTES = 32U * 1024U;
@@ -121,6 +126,16 @@ __aicore__ inline uint32_t ChunkFwdOL1KOffset(uint32_t streamSlot)
 __aicore__ inline uint32_t ChunkFwdOL1HOffset(uint32_t streamSlot)
 {
     return ChunkFwdOL1StreamBankBase(streamSlot) + CHUNK_FWD_O_L1_H_BASE;
+}
+
+__aicore__ inline uint32_t ChunkFwdOL1APrimeOffset(uint32_t headOffset)
+{
+    return CHUNK_FWD_O_L1_APRIME_BASE + headOffset * CHUNK_FWD_O_L1_APRIME_SLOT_BYTES;
+}
+
+__aicore__ inline uint32_t ChunkFwdOL1VOffset(uint32_t headOffset)
+{
+    return CHUNK_FWD_O_L1_V_BASE + headOffset * CHUNK_FWD_O_L1_V_SLOT_BYTES;
 }
 
 __aicore__ inline uint32_t ChunkFwdOL0AOffset(uint32_t slot)

@@ -8,6 +8,7 @@
  * Stage2 (AIC): L0/L1 streamSlot ping-pong + per-head CrossCore (59e83dc / PR404).
  * Stage3 (AIV): per-head S1→WaitStage2→S3, mode=0x2 pair handshake and
  *   independent A-prime/V-to-MTE3 ping-pong, without SyncAll.
+ * Stage4 (AIC): A-prime/V MTE2 prefetch + independent L0 ping-pong + FP32 Fixpipe to owner AIV.
  */
 
 #ifndef CHUNK_FWD_O_ARCH35_A5_H
@@ -27,6 +28,7 @@ public:
     static constexpr bool kEnableStage1 = true;
     static constexpr bool kEnableStage2 = true;
     static constexpr bool kEnableStage3 = true;
+    static constexpr bool kEnableStage4 = true;
 
     __aicore__ inline void Init(GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR h, GM_ADDR g, GM_ADDR cuSeqlens,
                                 GM_ADDR chunkOffsets, GM_ADDR o, GM_ADDR workspace,
@@ -66,7 +68,7 @@ public:
         }
 
         if ASCEND_IS_AIC {
-            if constexpr (kEnableStage2) {
+            if constexpr (kEnableStage2 || kEnableStage4) {
                 ChunkFwdOA5CubeProcess cube(q_, k_, v_, h_, g_, cuSeqlens_, chunkOffsets_, o_, workspace_);
                 cube.Init(tiling_);
                 RunStage2Aic(cube, aicCoreIdx, aicCoreNum);
@@ -114,13 +116,27 @@ private:
                                                      static_cast<uint32_t>(headOffset));
                             }
                         }
+                        if constexpr (kEnableStage4) {
+                            vector.SignalStage3Ready(static_cast<uint32_t>(headOffset));
+                        }
                         vector.SignalStage2Consumed(static_cast<uint32_t>(headOffset));
                     }
                 }
                 if constexpr (kEnableStage3) {
                     vector.FinishStage3Group();
                 }
-                if constexpr (kEnableStage2) {
+                if constexpr (kEnableStage4) {
+                    for (int64_t headOffset = 0; headOffset < taskCount; ++headOffset) {
+                        const uint32_t ownerSubBlock = static_cast<uint32_t>(headOffset % 2);
+                        const uint32_t localSlot = static_cast<uint32_t>(headOffset / 2);
+                        const int64_t hv = hvBase + headOffset;
+                        vector.WaitStage4Ready(static_cast<uint32_t>(headOffset));
+                        if (ownerSubBlock == subBlockIdx) {
+                            vector.DumpStage4Result(loopIdx, hv, localSlot);
+                        }
+                    }
+                }
+                if constexpr (kEnableStage2 || kEnableStage4) {
                     vector.ReleaseStage2Group();
                 }
             }
@@ -139,7 +155,12 @@ private:
             for (int64_t hvBase = 0; hvBase < tiling_.vNumHead; hvBase += tiling_.taskGroupSize) {
                 const int64_t remaining = tiling_.vNumHead - hvBase;
                 const int64_t taskCount = remaining < tiling_.taskGroupSize ? remaining : tiling_.taskGroupSize;
-                cube.ProcessStage2Group(loopIdx, loc, hvBase, taskCount);
+                if constexpr (kEnableStage2) {
+                    cube.ProcessStage2Group(loopIdx, loc, hvBase, taskCount);
+                }
+                if constexpr (kEnableStage4) {
+                    cube.ProcessStage4Group(loopIdx, loc, hvBase, taskCount);
+                }
                 cube.WaitStage2GroupRelease();
             }
         }

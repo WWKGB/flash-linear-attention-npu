@@ -37,6 +37,19 @@ __simd_callee__ inline void StoreGateFloatPair(__ubuf__ float *dst, RegTensor<fl
     StoreAlign<float, StoreDist::DIST_INTLV_B32>(dst, zero, one, maskF32);
 }
 
+__simd_vf__ inline void PadGateInput64VF(__ubuf__ float *gAddr, uint16_t validRows)
+{
+    RegTensor<float> gReg;
+    RegTensor<float> zeroReg;
+    MaskReg fullMask = CreateMask<float, MaskPattern::ALL>();
+    uint32_t validCount = static_cast<uint32_t>(validRows);
+    MaskReg validMask = UpdateMask<float>(validCount);
+    LoadAlign(gReg, gAddr);
+    Duplicate(zeroReg, 0.0f, fullMask);
+    Select(gReg, gReg, zeroReg, validMask);
+    StoreAlign(gAddr, gReg, fullMask);
+}
+
 template <bool UseExp2>
 __simd_vf__ inline void Stage1Gate64VF(__ubuf__ float *gateAAddr, __ubuf__ float *gAddr, uint16_t chunkLen)
 {
@@ -124,6 +137,7 @@ public:
     // S1/S2 precision validated — workspace dump off. Stage3 dump is issued after
     // each head's VF; MTE3 completion is drained per ping/pong slot at group end.
     static constexpr bool kEnableStage3WorkspaceDump = true;
+    static constexpr bool kEnableStage4WorkspaceDump = true;
     static constexpr bool kEnableStage12WorkspaceDump = false;
     static constexpr uint32_t kStreamBankCount = CHUNK_FWD_O_STREAM_BANK_COUNT;
     static constexpr uint32_t kLocalSlotCount = 2U;
@@ -167,6 +181,20 @@ public:
     {
         Catlass::Arch::CrossCoreFlag flag{
             static_cast<Catlass::Arch::FlagID>(CHUNK_FWD_O_CC_CUBE_READY_BASE + headOffset)};
+        Catlass::Arch::CrossCoreWaitFlag(flag);
+    }
+
+    __aicore__ inline void SignalStage3Ready(uint32_t headOffset)
+    {
+        Catlass::Arch::CrossCoreFlag flag{
+            static_cast<Catlass::Arch::FlagID>(CHUNK_FWD_O_CC_APRIME_READY_BASE + headOffset)};
+        Catlass::Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(flag);
+    }
+
+    __aicore__ inline void WaitStage4Ready(uint32_t headOffset)
+    {
+        Catlass::Arch::CrossCoreFlag flag{
+            static_cast<Catlass::Arch::FlagID>(CHUNK_FWD_O_CC_OL_READY_BASE + headOffset)};
         Catlass::Arch::CrossCoreWaitFlag(flag);
     }
 
@@ -261,8 +289,9 @@ public:
             Cast(gFp32, gLocal, RoundMode::CAST_NONE, loc.chunkLen);
         }
         if (loc.chunkLen < static_cast<uint32_t>(CHUNK_FWD_O_A5_BT)) {
-            Duplicate(gFp32[loc.chunkLen], static_cast<float>(0),
-                      static_cast<int32_t>(CHUNK_FWD_O_A5_BT - loc.chunkLen));
+            AscendC::VF_CALL<PadGateInput64VF>(
+                reinterpret_cast<__ubuf__ float *>(gFp32.GetPhyAddr()),
+                static_cast<uint16_t>(loc.chunkLen));
         }
         PipeBarrier<PIPE_V>();
 
@@ -410,6 +439,23 @@ public:
         ChunkFwdODumpUbToGm(slotBase, CHUNK_FWD_O_DBG_APRIME_OFF, aPrimeBf16, bt * bt);
         ChunkFwdODumpUbToGm(slotBase, CHUNK_FWD_O_DBG_OSPRIME_OFF, oSPrime, bt * vDim);
         (void)localSlot;
+    }
+
+    __aicore__ inline void DumpStage4Result(uint32_t loopIdx, int64_t hv, uint32_t localSlot)
+    {
+        if constexpr (!kEnableStage4WorkspaceDump) {
+            return;
+        }
+        if (!ChunkFwdODumpEnabled(tiling_)) {
+            return;
+        }
+        const int64_t slotIdx = ChunkFwdODumpSlotIndex(tiling_, loopIdx, hv);
+        GM_ADDR slotBase = ChunkFwdODumpSlotPtr(workspace_, tiling_, slotIdx);
+        LocalTensor<float> ol =
+            ubBuf_.GetWithOffset<float>(CHUNK_FWD_O_A5_BT * CHUNK_FWD_O_A5_V, ChunkFwdOOlOffset(localSlot));
+        ChunkFwdODumpUbToGm(
+            slotBase, CHUNK_FWD_O_DBG_OL_OFF, ol,
+            CHUNK_FWD_O_A5_BT * CHUNK_FWD_O_A5_V);
     }
 
     __aicore__ inline void DumpStage2Workspace(uint32_t loopIdx, int64_t hv, uint32_t localSlot)

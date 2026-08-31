@@ -44,6 +44,7 @@ BT = 64
 K = 128
 V = 128
 CHECK_STAGE45 = False
+CHECK_STAGE4 = False
 CHECK_STAGE3 = True
 CHECK_STAGE2 = True
 DBG_HEADER_BYTES = 64
@@ -54,7 +55,7 @@ DBG_ARAW_BYTES = BT * BT * 4
 DBG_OSRAW_BYTES = BT * V * 4
 DBG_APRIME_BYTES = BT * BT * 2
 DBG_OSPRIME_BYTES = BT * V * 4
-DBG_OL_BYTES = 0
+DBG_OL_BYTES = BT * V * 4
 DBG_MASK_OFF = 0
 DBG_GATE_O_OFF = DBG_MASK_BYTES
 DBG_GATE_A_OFF = DBG_GATE_O_OFF + DBG_GATE_O_BYTES
@@ -187,6 +188,10 @@ def _read_slot(user_ws: np.ndarray, slot_idx: int, slot_bytes: int, *, stage1_on
             .reshape(BT, V)
             .copy()
         )
+    if slot_bytes >= DBG_OL_OFF + DBG_OL_BYTES:
+        o_l = chunk[DBG_OL_OFF : DBG_OL_OFF + DBG_OL_BYTES].view(np.float32).reshape(BT, V).copy()
+    else:
+        o_l = np.zeros((BT, V), dtype=np.float32)
     return {
         "mask": mask,
         "gate_o": gate_o,
@@ -195,6 +200,7 @@ def _read_slot(user_ws: np.ndarray, slot_idx: int, slot_bytes: int, *, stage1_on
         "O_s_raw": o_s_raw,
         "A_prime": a_prime,
         "O_s_prime": o_s_prime,
+        "O_l": o_l,
     }
 
 
@@ -227,7 +233,10 @@ def _cpu_stage_refs(q, k, v, h, g, chunk_len: int, *, scale: float, use_exp2: bo
     a_prime_fp32 = torch.from_numpy(a_raw) * gate_a * torch.from_numpy(mask).float()
     a_prime = a_prime_fp32.to(torch.bfloat16).float().numpy()
     o_s_prime = torch.from_numpy(o_s_raw) * gate_o.unsqueeze(1)
-    o_l_raw = (a_prime_fp32.to(torch.bfloat16) @ v_bf).float().numpy()
+    # Stage4 keeps the Cube accumulator/Fixpipe result in FP32.  Build the
+    # reference from the exact bf16 input values without rounding the GEMM
+    # output back to bf16 first.
+    o_l_raw = (a_prime_fp32.to(torch.bfloat16).float() @ v_bf.float()).numpy()
     o_final = ((o_s_prime + torch.from_numpy(o_l_raw)) * scale).to(torch.bfloat16).float().numpy()
 
     return {
@@ -288,7 +297,8 @@ def _find_user_workspace(ws_np: np.ndarray) -> tuple[int, np.ndarray]:
 
 
 def run_case(*, seqlen=64, heads=None, hk=None, hv=None, use_exp2: bool = False, seed: int = 0,
-             stage1_only: bool = False, stage3_only: bool = False, transport_only: bool = False):
+             stage1_only: bool = False, stage3_only: bool = False, stage4_only: bool = False,
+             transport_only: bool = False):
     torch.manual_seed(seed)
     np.random.seed(seed)
 
@@ -305,8 +315,9 @@ def run_case(*, seqlen=64, heads=None, hk=None, hv=None, use_exp2: bool = False,
         raise ValueError(f"G=HV/HK must be in [1,4], got {g_ratio}")
 
     B, HK, HV = 1, hk, hv
-    check_stage2 = CHECK_STAGE2 and not stage1_only and not stage3_only
-    check_stage3 = CHECK_STAGE3 and not stage1_only
+    check_stage2 = CHECK_STAGE2 and not stage1_only and not stage3_only and not stage4_only
+    check_stage3 = CHECK_STAGE3 and not stage1_only and not stage4_only
+    check_stage4 = CHECK_STAGE4 and not stage1_only and not stage3_only
     check_stage45 = CHECK_STAGE45 and not stage1_only and not stage3_only
     scale = K ** -0.5
     chunk_size = 64
@@ -361,7 +372,7 @@ def run_case(*, seqlen=64, heads=None, hk=None, hv=None, use_exp2: bool = False,
             refs[(chunk_idx, hv)] = ref
             dumps[(chunk_idx, hv)] = dump
             tag = f"c{chunk_idx}/h{hv}"
-            if not stage3_only:
+            if not stage3_only and not stage4_only:
                 ok &= _compare(f"gate_o[{tag}]", ref["gate_o"], dump["gate_o"], atol=1e-3, rtol=1e-2)
                 ok &= _compare(f"gate_A[{tag}]", ref["gate_A"], dump["gate_A"], atol=1e-2, rtol=1e-2)
             if check_stage2:
@@ -393,6 +404,17 @@ def run_case(*, seqlen=64, heads=None, hk=None, hv=None, use_exp2: bool = False,
                     dump["O_s_prime"][:chunk_len],
                     atol=0.05,
                     rtol=0.01,
+                )
+            if check_stage4:
+                o_l_from_dump = (
+                    torch.from_numpy(dump["A_prime"]).float() @ v_pad.float()
+                ).numpy()
+                ok &= _compare(
+                    f"O_l[{tag}]",
+                    o_l_from_dump[:chunk_len],
+                    dump["O_l"][:chunk_len],
+                    atol=0.35,
+                    rtol=0.05,
                 )
             if check_stage45:
                 out_chunk = out[0, hv, token_begin : token_begin + chunk_len].cpu().float().numpy()
@@ -449,6 +471,8 @@ ALL_NAMED_CASES = DEFAULT_TRANSPORT_CASES + [
     ("G=1 T=256 exp2", dict(seqlen=256, heads=2, use_exp2=True, seed=3)),
     ("G=2 HK16 HV32 T=128", dict(seqlen=128, hk=16, hv=32, use_exp2=True, seed=13)),
     ("G=2 HK16 HV32 T=256", dict(seqlen=256, hk=16, hv=32, use_exp2=True, seed=14)),
+    ("G=1 T=65 tail", dict(seqlen=65, heads=4, use_exp2=True, seed=15)),
+    ("G=4 HK8 HV32 T=73 tail", dict(seqlen=73, hk=8, hv=32, use_exp2=True, seed=16)),
 ]
 
 CASE_TIMEOUTS = {name: DEFAULT_CASE_TIMEOUT_SEC for name, _ in ALL_NAMED_CASES}
@@ -461,6 +485,7 @@ def _run_case_with_timeout(
     *,
     stage1_only: bool = False,
     stage3_only: bool = False,
+    stage4_only: bool = False,
     transport_only: bool = False,
 ) -> bool:
     case_kwargs = dict(kwargs)
@@ -468,6 +493,8 @@ def _run_case_with_timeout(
         case_kwargs["stage1_only"] = True
     if stage3_only:
         case_kwargs["stage3_only"] = True
+    if stage4_only:
+        case_kwargs["stage4_only"] = True
     if transport_only:
         case_kwargs["transport_only"] = True
     payload = json.dumps({"name": name, **case_kwargs})
@@ -476,6 +503,8 @@ def _run_case_with_timeout(
         cmd.append("--stage1-only")
     if stage3_only:
         cmd.append("--stage3-only")
+    if stage4_only:
+        cmd.append("--stage4-only")
     if transport_only:
         cmd.append("--transport")
     try:
@@ -533,6 +562,11 @@ def main():
         help="Only check A_prime and O_s_prime (S3 workspace dump; requires --precision).",
     )
     parser.add_argument(
+        "--stage4-only",
+        action="store_true",
+        help="Only check O_l (S4 workspace dump; requires --precision).",
+    )
+    parser.add_argument(
         "--transport",
         action="store_true",
         help="Kernel launch + NPU sync only.",
@@ -543,14 +577,21 @@ def main():
         help="Workspace-dump Stage1/2 precision regression.",
     )
     args = parser.parse_args()
-    global CHECK_STAGE2, CHECK_STAGE3, CHECK_STAGE45
+    global CHECK_STAGE2, CHECK_STAGE3, CHECK_STAGE4, CHECK_STAGE45
     if args.stage1_only:
         CHECK_STAGE2 = False
         CHECK_STAGE3 = False
+        CHECK_STAGE4 = False
         CHECK_STAGE45 = False
     if args.stage3_only:
         CHECK_STAGE2 = False
         CHECK_STAGE3 = True
+        CHECK_STAGE4 = False
+        CHECK_STAGE45 = False
+    if args.stage4_only:
+        CHECK_STAGE2 = False
+        CHECK_STAGE3 = False
+        CHECK_STAGE4 = True
         CHECK_STAGE45 = False
     if args.single_json is not None:
         sys.exit(_run_single_from_json(args.single_json))
@@ -582,6 +623,7 @@ def main():
                 timeout_sec,
                 stage1_only=args.stage1_only,
                 stage3_only=args.stage3_only,
+                stage4_only=args.stage4_only,
                 transport_only=transport_only,
             ):
                 failed.append(name)
