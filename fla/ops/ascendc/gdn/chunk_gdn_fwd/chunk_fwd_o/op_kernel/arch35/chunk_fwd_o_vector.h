@@ -206,11 +206,6 @@ public:
         Catlass::Arch::CrossCoreWaitFlag(cubeToVecFlag_);
     }
 
-    __aicore__ inline void SignalStage1Ready()
-    {
-        Catlass::Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecToCubeFlag_);
-    }
-
     __aicore__ inline void ReleaseStage2Group()
     {
         Catlass::Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecToCubeFlag_);

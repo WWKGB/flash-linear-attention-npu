@@ -118,8 +118,6 @@ public:
         PrefetchQKH(loc, hk0, hv0, l1StreamSlot_);
 
         for (int64_t headOffset = 0; headOffset < taskCount; ++headOffset) {
-            WaitStage1Ready();
-
             if (headOffset + 1 < taskCount) {
                 const int64_t hvNext = hvBase + headOffset + 1;
                 const int64_t hkNext = hvNext / tiling_.hvPerHk;
@@ -136,11 +134,6 @@ public:
     }
 
     __aicore__ inline void WaitStage2GroupRelease()
-    {
-        Catlass::Arch::CrossCoreWaitFlag(vecToCubeFlag_);
-    }
-
-    __aicore__ inline void WaitStage1Ready()
     {
         Catlass::Arch::CrossCoreWaitFlag(vecToCubeFlag_);
     }

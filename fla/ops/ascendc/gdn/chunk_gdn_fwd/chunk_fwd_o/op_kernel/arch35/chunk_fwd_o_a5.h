@@ -93,14 +93,13 @@ private:
                 const int64_t taskCount = remaining < tiling_.taskGroupSize ? remaining : tiling_.taskGroupSize;
 
                 // PR404-style stage round: both subblocks walk every headOffset;
-                // only the owner computes, while both participate in mode=0x2.
+                // only the owner computes. Stages with a cube consumer use mode=0x2.
                 vector.BeginStage1GroupPrefetch(loc, hvBase, taskCount, subBlockIdx);
                 for (int64_t headOffset = 0; headOffset < taskCount; ++headOffset) {
                     const uint32_t ownerSubBlock = static_cast<uint32_t>(headOffset % 2);
                     if (ownerSubBlock == subBlockIdx) {
                         vector.ProcessStage1Head(loc, hvBase, headOffset, taskCount, subBlockIdx);
                     }
-                    vector.SignalStage1Ready();
                 }
 
                 if constexpr (kEnableStage2) {
