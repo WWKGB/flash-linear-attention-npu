@@ -113,17 +113,7 @@ public:
         }
 
         l1StreamSlot_ = 0U;
-        const int64_t hv0 = hvBase;
-        const int64_t hk0 = hv0 / tiling_.hvPerHk;
-        PrefetchQKH(loc, hk0, hv0, l1StreamSlot_);
-
         for (int64_t headOffset = 0; headOffset < taskCount; ++headOffset) {
-            if (headOffset + 1 < taskCount) {
-                const int64_t hvNext = hvBase + headOffset + 1;
-                const int64_t hkNext = hvNext / tiling_.hvPerHk;
-                PrefetchQKH(loc, hkNext, hvNext, l1StreamSlot_ ^ 1U);
-            }
-
             const int64_t hv = hvBase + headOffset;
             const int64_t hk = hv / tiling_.hvPerHk;
             const uint32_t ownerSubBlock = static_cast<uint32_t>(headOffset % 2);
@@ -150,19 +140,12 @@ public:
         }
 
         l1StreamSlot_ = 0U;
-        WaitStage3Ready();
-        PrefetchStage4(loc, hvBase, 0U, l1StreamSlot_);
-
         for (int64_t headOffset = 0; headOffset < taskCount; ++headOffset) {
-            if (headOffset + 1 < taskCount) {
-                const uint32_t nextHeadOffset = static_cast<uint32_t>(headOffset + 1);
-                WaitStage3Ready();
-                PrefetchStage4(loc, hvBase + headOffset + 1, nextHeadOffset, l1StreamSlot_ ^ 1U);
-            }
-
+            WaitStage3Ready();
             const uint32_t ownerSubBlock = static_cast<uint32_t>(headOffset % 2);
             const uint32_t localSlot = static_cast<uint32_t>(headOffset / 2);
-            ProcessStage4Head(ownerSubBlock, localSlot, static_cast<uint32_t>(headOffset), l1StreamSlot_);
+            ProcessStage4Head(loc, hvBase + headOffset, ownerSubBlock, localSlot,
+                              static_cast<uint32_t>(headOffset), l1StreamSlot_);
             l1StreamSlot_ ^= 1U;
         }
     }
@@ -193,8 +176,8 @@ private:
         return static_cast<TEventID>(kL1Mte2Mte1Base + slot * 2U);
     }
 
-    __aicore__ inline void PrefetchStage4(const ChunkFwdOChunkLoc &loc, int64_t hv, uint32_t headOffset,
-                                          uint32_t l1StreamSlot)
+    __aicore__ inline void LoadStage4Inputs(const ChunkFwdOChunkLoc &loc, int64_t hv, uint32_t headOffset,
+                                            uint32_t l1StreamSlot)
     {
         const uint32_t m = kBt;
         const uint32_t coreIdx = AscendC::GetBlockIdx();
@@ -233,9 +216,11 @@ private:
         SetFlag<HardEvent::MTE2_MTE1>(L1Mte2Mte1Event(l1StreamSlot));
     }
 
-    __aicore__ inline void ProcessStage4Head(uint32_t ownerSubBlock, uint32_t localSlot, uint32_t headOffset,
-                                             uint32_t l1StreamSlot)
+    __aicore__ inline void ProcessStage4Head(const ChunkFwdOChunkLoc &loc, int64_t hv,
+                                             uint32_t ownerSubBlock, uint32_t localSlot,
+                                             uint32_t headOffset, uint32_t l1StreamSlot)
     {
+        LoadStage4Inputs(loc, hv, headOffset, l1StreamSlot);
         WaitFlag<HardEvent::MTE2_MTE1>(L1Mte2Mte1Event(l1StreamSlot));
 
         const uint32_t avASlot = l0ASlot_;
@@ -252,7 +237,8 @@ private:
         Catlass::Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(cubeToVecFlag_);
     }
 
-    __aicore__ inline void PrefetchQKH(const ChunkFwdOChunkLoc &loc, int64_t hk, int64_t hv, uint32_t l1StreamSlot)
+    __aicore__ inline void LoadQKH(const ChunkFwdOChunkLoc &loc, int64_t hk, int64_t hv,
+                                   uint32_t l1StreamSlot)
     {
         const uint32_t m = kBt;
         const int64_t qOffset = ChunkFwdOQKOffset(tiling_, loc, hk);
@@ -302,11 +288,9 @@ private:
                                              uint32_t ownerSubBlock, uint32_t localSlot,
                                              uint32_t l1StreamSlot)
     {
-        (void)loc;
-        (void)hk;
-        (void)hv;
         const uint32_t m = kBt;
 
+        LoadQKH(loc, hk, hv, l1StreamSlot);
         WaitFlag<HardEvent::MTE2_MTE1>(L1Mte2Mte1Event(l1StreamSlot));
 
         const uint32_t qktASlot = l0ASlot_;

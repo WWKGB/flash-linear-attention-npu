@@ -221,28 +221,7 @@ public:
         WaitFlag<HardEvent::V_MTE2>(gateReadyEvent_[localSlot]);
     }
 
-    __aicore__ inline int64_t FindFirstOwnerHeadOffset(int64_t taskCount, uint32_t subBlockIdx) const
-    {
-        for (int64_t headOffset = 0; headOffset < taskCount; ++headOffset) {
-            if (static_cast<uint32_t>(headOffset % 2) == subBlockIdx) {
-                return headOffset;
-            }
-        }
-        return -1;
-    }
-
-    __aicore__ inline int64_t FindNextOwnerHeadOffset(int64_t headOffset, int64_t taskCount,
-                                                      uint32_t subBlockIdx) const
-    {
-        for (int64_t nextHead = headOffset + 1; nextHead < taskCount; ++nextHead) {
-            if (static_cast<uint32_t>(nextHead % 2) == subBlockIdx) {
-                return nextHead;
-            }
-        }
-        return -1;
-    }
-
-    __aicore__ inline void PrefetchStage1G(const ChunkFwdOChunkLoc &loc, int64_t hv, uint32_t streamSlot)
+    __aicore__ inline void LoadStage1G(const ChunkFwdOChunkLoc &loc, int64_t hv, uint32_t streamSlot)
     {
         GlobalTensor<GT> gGm;
         gGm.SetGlobalBuffer((__gm__ GT *)g_);
@@ -301,24 +280,15 @@ public:
         PipeBarrier<PIPE_V>();
     }
 
-    __aicore__ inline void BeginStage1GroupPrefetch(const ChunkFwdOChunkLoc &loc, int64_t hvBase, int64_t taskCount,
-                                                    uint32_t subBlockIdx)
+    __aicore__ inline void BeginStage1Group()
     {
         streamSlot_ = 0U;
-        const int64_t firstOwner = FindFirstOwnerHeadOffset(taskCount, subBlockIdx);
-        if (firstOwner >= 0) {
-            PrefetchStage1G(loc, hvBase + firstOwner, streamSlot_);
-        }
     }
 
-    __aicore__ inline void ProcessStage1Head(const ChunkFwdOChunkLoc &loc, int64_t hvBase, int64_t headOffset,
-                                             int64_t taskCount, uint32_t subBlockIdx)
+    __aicore__ inline void ProcessStage1Head(const ChunkFwdOChunkLoc &loc, int64_t hvBase, int64_t headOffset)
     {
         const uint32_t localSlot = static_cast<uint32_t>(headOffset / 2);
-        const int64_t nextOwner = FindNextOwnerHeadOffset(headOffset, taskCount, subBlockIdx);
-        if (nextOwner >= 0) {
-            PrefetchStage1G(loc, hvBase + nextOwner, streamSlot_ ^ 1U);
-        }
+        LoadStage1G(loc, hvBase + headOffset, streamSlot_);
         ComputeStage1Gate(loc, localSlot, streamSlot_);
         SignalGateReady(localSlot);
         streamSlot_ ^= 1U;
@@ -327,10 +297,10 @@ public:
     __aicore__ inline void ProcessStage1Group(const ChunkFwdOChunkLoc &loc, int64_t hvBase, int64_t taskCount,
                                               uint32_t subBlockIdx)
     {
-        BeginStage1GroupPrefetch(loc, hvBase, taskCount, subBlockIdx);
+        BeginStage1Group();
         for (int64_t headOffset = 0; headOffset < taskCount; ++headOffset) {
             if (static_cast<uint32_t>(headOffset % 2) == subBlockIdx) {
-                ProcessStage1Head(loc, hvBase, headOffset, taskCount, subBlockIdx);
+                ProcessStage1Head(loc, hvBase, headOffset);
             }
         }
     }
