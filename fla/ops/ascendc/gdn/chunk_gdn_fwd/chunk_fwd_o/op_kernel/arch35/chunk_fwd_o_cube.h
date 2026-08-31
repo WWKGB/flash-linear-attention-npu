@@ -98,6 +98,10 @@ public:
             l0BSlot_ = 0U;
             l0CSlot_ = 0U;
             l1StreamSlot_ = 0U;
+            cachedLoopIdx_[0] = static_cast<uint32_t>(-1);
+            cachedLoopIdx_[1] = static_cast<uint32_t>(-1);
+            cachedHk_[0] = -1;
+            cachedHk_[1] = -1;
         }
     }
 
@@ -107,7 +111,6 @@ public:
         if ASCEND_IS_AIV {
             return;
         }
-        (void)loopIdx;
         if (taskCount <= 0) {
             return;
         }
@@ -118,7 +121,10 @@ public:
             const int64_t hk = hv / tiling_.hvPerHk;
             const uint32_t ownerSubBlock = static_cast<uint32_t>(headOffset % 2);
             const uint32_t localSlot = static_cast<uint32_t>(headOffset / 2);
-            ProcessStage2Head(loc, hk, hv, ownerSubBlock, localSlot, l1StreamSlot_);
+            const bool loadQK = cachedLoopIdx_[l1StreamSlot_] != loopIdx || cachedHk_[l1StreamSlot_] != hk;
+            ProcessStage2Head(loc, hk, hv, ownerSubBlock, localSlot, l1StreamSlot_, loadQK);
+            cachedLoopIdx_[l1StreamSlot_] = loopIdx;
+            cachedHk_[l1StreamSlot_] = hk;
             l1StreamSlot_ ^= 1U;
         }
     }
@@ -148,6 +154,9 @@ public:
                               static_cast<uint32_t>(headOffset), l1StreamSlot_);
             l1StreamSlot_ ^= 1U;
         }
+        // Stage4 uses [256, 352) KiB in L1, which overlaps slot1's Q/K cache.
+        cachedLoopIdx_[1] = static_cast<uint32_t>(-1);
+        cachedHk_[1] = -1;
     }
 
     __aicore__ inline void WaitStage3Ready()
@@ -237,19 +246,14 @@ private:
         Catlass::Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(cubeToVecFlag_);
     }
 
-    __aicore__ inline void LoadQKH(const ChunkFwdOChunkLoc &loc, int64_t hk, int64_t hv,
-                                   uint32_t l1StreamSlot)
+    __aicore__ inline void LoadQK(const ChunkFwdOChunkLoc &loc, int64_t hk, uint32_t l1StreamSlot)
     {
         const uint32_t m = kBt;
         const int64_t qOffset = ChunkFwdOQKOffset(tiling_, loc, hk);
         const int64_t kOffset = ChunkFwdOQKOffset(tiling_, loc, hk);
-        const int64_t hOffset = ChunkFwdOHOffset(tiling_, loc, hv);
-
-        WaitFlag<HardEvent::MTE1_MTE2>(L1Mte1Mte2Event(l1StreamSlot));
 
         using LayoutTagL1Q = typename TileCopyQK::LayoutTagL1A;
         using LayoutTagL1K = typename TileCopyQK::LayoutTagL1B;
-        using LayoutTagL1H = typename TileCopyQH::LayoutTagL1B;
 
         auto layoutQGm = tla::MakeLayout<Element, LayoutRM>(m, kK);
         auto layoutKGm = tla::MakeLayout<Element, LayoutCM>(kK, m);
@@ -270,7 +274,12 @@ private:
 
         CopyGmToL1Q{}(tensorL1Q, blockQ);
         CopyGmToL1K{}(tensorL1K, blockK);
+    }
 
+    __aicore__ inline void LoadH(const ChunkFwdOChunkLoc &loc, int64_t hv, uint32_t l1StreamSlot)
+    {
+        const int64_t hOffset = ChunkFwdOHOffset(tiling_, loc, hv);
+        using LayoutTagL1H = typename TileCopyQH::LayoutTagL1B;
         auto layoutHGm = tla::MakeLayout<Element, LayoutCM>(kK, kV);
         auto tensorHGm = tla::MakeTensor(hGm_[hOffset], layoutHGm, Catlass::Arch::PositionGM{});
         auto blockH = GetTile(tensorHGm, tla::MakeCoord(0, 0), tla::MakeShape(kK, kV));
@@ -280,17 +289,20 @@ private:
         auto layoutL1H = tla::MakeLayout<Element, LayoutTagL1H>(kK, kV);
         auto tensorL1H = tla::MakeTensor(l1H, layoutL1H, Catlass::Arch::PositionL1{});
         CopyGmToL1H{}(tensorL1H, blockH);
-
-        SetFlag<HardEvent::MTE2_MTE1>(L1Mte2Mte1Event(l1StreamSlot));
     }
 
     __aicore__ inline void ProcessStage2Head(const ChunkFwdOChunkLoc &loc, int64_t hk, int64_t hv,
                                              uint32_t ownerSubBlock, uint32_t localSlot,
-                                             uint32_t l1StreamSlot)
+                                             uint32_t l1StreamSlot, bool loadQK)
     {
         const uint32_t m = kBt;
 
-        LoadQKH(loc, hk, hv, l1StreamSlot);
+        WaitFlag<HardEvent::MTE1_MTE2>(L1Mte1Mte2Event(l1StreamSlot));
+        if (loadQK) {
+            LoadQK(loc, hk, l1StreamSlot);
+        }
+        LoadH(loc, hv, l1StreamSlot);
+        SetFlag<HardEvent::MTE2_MTE1>(L1Mte2Mte1Event(l1StreamSlot));
         WaitFlag<HardEvent::MTE2_MTE1>(L1Mte2Mte1Event(l1StreamSlot));
 
         const uint32_t qktASlot = l0ASlot_;
@@ -526,6 +538,9 @@ private:
     uint32_t l0BSlot_ = 0U;
     uint32_t l0CSlot_ = 0U;
     uint32_t l1StreamSlot_ = 0U;
+    uint32_t cachedLoopIdx_[kL1StreamBankCount] = {
+        static_cast<uint32_t>(-1), static_cast<uint32_t>(-1)};
+    int64_t cachedHk_[kL1StreamBankCount] = {-1, -1};
 };
 
 } // namespace GDN
