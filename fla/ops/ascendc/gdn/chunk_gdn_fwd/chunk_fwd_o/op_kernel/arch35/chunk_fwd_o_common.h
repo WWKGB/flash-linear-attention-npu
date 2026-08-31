@@ -228,7 +228,10 @@ __aicore__ inline int64_t ChunkFwdOVOOffset(const ChunkFwdOTilingData &tiling, c
 __aicore__ inline int64_t ChunkFwdOOOffset(const ChunkFwdOTilingData &tiling, const ChunkFwdOChunkLoc &loc,
                                            int64_t hv)
 {
-    return ChunkFwdOVOOffset(tiling, loc, hv);
+    // A5 writes O in sequence-major BSND/TND layout; V remains head-major.
+    const int64_t token = static_cast<int64_t>(loc.batchIdx) * tiling.seqlen +
+                          static_cast<int64_t>(loc.tokenStart);
+    return (token * tiling.vNumHead + hv) * tiling.vHeadDim;
 }
 
 __aicore__ inline int64_t ChunkFwdOGOffset(const ChunkFwdOTilingData &tiling, const ChunkFwdOChunkLoc &loc,

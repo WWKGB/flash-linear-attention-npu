@@ -508,7 +508,11 @@ public:
         WaitFlag<HardEvent::V_MTE3>(vToMte3Event_);
         const int64_t oOffset = ChunkFwdOOOffset(tiling_, loc, hv);
         DataCopyExtParams outputCopyParams{
-            1, static_cast<uint32_t>(loc.chunkLen * vDim * sizeof(bfloat16_t)), 0, 0, 0};
+            static_cast<uint16_t>(loc.chunkLen),
+            static_cast<uint32_t>(vDim * sizeof(bfloat16_t)),
+            0,
+            static_cast<uint32_t>((tiling_.vNumHead - 1) * vDim * sizeof(bfloat16_t)),
+            0};
         DataCopyPad(oGm_[oOffset], oOut, outputCopyParams);
     }
 

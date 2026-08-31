@@ -70,7 +70,8 @@ DBG_SLOT_BYTES = ((DBG_OL_OFF + DBG_OL_BYTES + 511) // 512) * 512
 def _call_chunk_fwd_o_with_workspace(q, k, v, h, g, scale, *, cu_seqlens, chunk_indices, chunk_size=64):
     import torch
 
-    out = torch.empty_like(v)
+    # A5 output is sequence-major BSND: [B, T, HV, V].
+    out = torch.empty((v.shape[0], v.shape[2], v.shape[1], v.shape[3]), dtype=v.dtype, device=v.device)
     aclnn_runtime = runtime()
     device = ensure_npu_tensor(out, "out").device
     ctx = _CallContext(aclnn_runtime, device)
@@ -417,7 +418,7 @@ def run_case(*, seqlen=64, heads=None, hk=None, hv=None, use_exp2: bool = False,
                     rtol=0.05,
                 )
             if check_stage5:
-                out_chunk = out[0, hv, token_begin : token_begin + chunk_len].cpu().float().numpy()
+                out_chunk = out[0, token_begin : token_begin + chunk_len, hv].cpu().float().numpy()
                 o_from_dump = (
                     (torch.from_numpy(dump["O_s_prime"]) + torch.from_numpy(dump["O_l"])) * scale
                 ).to(torch.bfloat16).float().numpy()
