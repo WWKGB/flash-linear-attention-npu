@@ -239,9 +239,14 @@ private:
         l0BSlot_ ^= 1U;
         l0CSlot_ ^= 1U;
 
-        RunGemmAV(kBt, headOffset, avASlot, avBSlot, avCSlot);
+        const uint32_t mActual = static_cast<uint32_t>(loc.chunkLen);
+        if (mActual == kBt) {
+            RunGemmAVFull(headOffset, avASlot, avBSlot, avCSlot);
+        } else {
+            RunGemmAVTail(mActual, mActual, headOffset, avASlot, avBSlot, avCSlot);
+        }
         SetFlag<HardEvent::MTE1_MTE2>(L1Mte1Mte2Event(l1StreamSlot));
-        PublishOl(kBt, ownerSubBlock, localSlot, avCSlot);
+        PublishOl(mActual, ownerSubBlock, localSlot, avCSlot);
 
         Catlass::Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(cubeToVecFlag_);
     }
@@ -249,6 +254,7 @@ private:
     __aicore__ inline void LoadQK(const ChunkFwdOChunkLoc &loc, int64_t hk, uint32_t l1StreamSlot)
     {
         const uint32_t m = kBt;
+        const uint32_t mActual = static_cast<uint32_t>(loc.chunkLen);
         const int64_t qOffset = ChunkFwdOQKOffset(tiling_, loc, hk);
         const int64_t kOffset = ChunkFwdOQKOffset(tiling_, loc, hk);
 
@@ -259,8 +265,8 @@ private:
         auto layoutKGm = tla::MakeLayout<Element, LayoutCM>(kK, m);
         auto tensorQGm = tla::MakeTensor(qGm_[qOffset], layoutQGm, Catlass::Arch::PositionGM{});
         auto tensorKGm = tla::MakeTensor(kGm_[kOffset], layoutKGm, Catlass::Arch::PositionGM{});
-        auto blockQ = GetTile(tensorQGm, tla::MakeCoord(0, 0), tla::MakeShape(m, kK));
-        auto blockK = GetTile(tensorKGm, tla::MakeCoord(0, 0), tla::MakeShape(kK, m));
+        auto blockQ = GetTile(tensorQGm, tla::MakeCoord(0, 0), tla::MakeShape(mActual, kK));
+        auto blockK = GetTile(tensorKGm, tla::MakeCoord(0, 0), tla::MakeShape(kK, mActual));
 
         using CopyGmToL1Q = typename TileCopyQK::template CopyGmToL1A<decltype(blockQ)>;
         using CopyGmToL1K = typename TileCopyQK::template CopyGmToL1B<decltype(blockK)>;
@@ -467,8 +473,8 @@ private:
         SetFlag<HardEvent::M_MTE1>(L0BEvent(l0BSlot));
     }
 
-    __aicore__ inline void RunGemmAV(uint32_t m, uint32_t headOffset, uint32_t l0ASlot, uint32_t l0BSlot,
-                                     uint32_t l0CSlot)
+    __aicore__ inline void RunGemmAVFull(uint32_t headOffset, uint32_t l0ASlot, uint32_t l0BSlot,
+                                         uint32_t l0CSlot)
     {
         using LayoutTagL1A = typename TileCopyAV::LayoutTagL1A;
         using LayoutTagL1B = typename TileCopyAV::LayoutTagL1B;
@@ -488,21 +494,21 @@ private:
             resource_.l0BBuf.template GetBufferByByte<Element>(ChunkFwdOL0BOffset(l0BSlot));
         LocalTensor<float> l0C = resource_.l0CBuf.template GetBufferByByte<float>(ChunkFwdOL0COffset(l0CSlot));
 
-        auto layoutL1APrime = tla::MakeLayout<Element, LayoutTagL1A>(m, m);
-        auto layoutL1V = tla::MakeLayout<Element, LayoutTagL1B>(m, kV);
-        auto layoutL0A = tla::MakeLayout<Element, LayoutTagL0A>(m, m);
-        auto layoutL0B = tla::MakeLayout<Element, LayoutTagL0B>(m, kV);
-        auto layoutL0C = tla::MakeLayoutL0C(m, kV);
+        auto layoutL1APrime = tla::MakeLayout<Element, LayoutTagL1A>(kBt, kBt);
+        auto layoutL1V = tla::MakeLayout<Element, LayoutTagL1B>(kBt, kV);
+        auto layoutL0A = tla::MakeLayout<Element, LayoutTagL0A>(kBt, kBt);
+        auto layoutL0B = tla::MakeLayout<Element, LayoutTagL0B>(kBt, kV);
+        auto layoutL0C = tla::MakeLayoutL0C(kBt, kV);
         auto tensorL1APrime = tla::MakeTensor(l1APrime, layoutL1APrime, Catlass::Arch::PositionL1{});
         auto tensorL1V = tla::MakeTensor(l1V, layoutL1V, Catlass::Arch::PositionL1{});
         auto tensorL0A = tla::MakeTensor(l0A, layoutL0A, Catlass::Arch::PositionL0A{});
         auto tensorL0B = tla::MakeTensor(l0B, layoutL0B, Catlass::Arch::PositionL0B{});
         auto tensorL0C = tla::MakeTensor(l0C, layoutL0C, Catlass::Arch::PositionL0C{});
-        auto tileL1APrime = GetTile(tensorL1APrime, tla::MakeCoord(0, 0), tla::MakeShape(m, m));
-        auto tileL1V = GetTile(tensorL1V, tla::MakeCoord(0, 0), tla::MakeShape(m, kV));
-        auto tileL0A = GetTile(tensorL0A, tla::MakeCoord(0, 0), tla::MakeShape(m, m));
-        auto tileL0B = GetTile(tensorL0B, tla::MakeCoord(0, 0), tla::MakeShape(m, kV));
-        auto tileL0C = GetTile(tensorL0C, tla::MakeCoord(0, 0), tla::MakeShape(m, kV));
+        auto tileL1APrime = GetTile(tensorL1APrime, tla::MakeCoord(0, 0), tla::MakeShape(kBt, kBt));
+        auto tileL1V = GetTile(tensorL1V, tla::MakeCoord(0, 0), tla::MakeShape(kBt, kV));
+        auto tileL0A = GetTile(tensorL0A, tla::MakeCoord(0, 0), tla::MakeShape(kBt, kBt));
+        auto tileL0B = GetTile(tensorL0B, tla::MakeCoord(0, 0), tla::MakeShape(kBt, kV));
+        auto tileL0C = GetTile(tensorL0C, tla::MakeCoord(0, 0), tla::MakeShape(kBt, kV));
 
         WaitFlag<HardEvent::M_MTE1>(L0AEvent(l0ASlot));
         WaitFlag<HardEvent::M_MTE1>(L0BEvent(l0BSlot));
@@ -511,7 +517,57 @@ private:
         CopyL1ToL0B{}(tileL0B, tileL1V);
         SetFlag<HardEvent::MTE1_M>(l0CSlot);
         WaitFlag<HardEvent::MTE1_M>(l0CSlot);
-        TileMmad{}(tileL0C, tileL0A, tileL0B, m, kV, m, true, 0);
+        TileMmad{}(tileL0C, tileL0A, tileL0B, kBt, kV, kBt, true, 0);
+        PipeBarrier<PIPE_M>();
+        SetFlag<HardEvent::M_MTE1>(L0AEvent(l0ASlot));
+        SetFlag<HardEvent::M_MTE1>(L0BEvent(l0BSlot));
+    }
+
+    __aicore__ inline void RunGemmAVTail(uint32_t mActual, uint32_t kActual, uint32_t headOffset,
+                                         uint32_t l0ASlot, uint32_t l0BSlot, uint32_t l0CSlot)
+    {
+        using LayoutTagL1A = typename TileCopyAV::LayoutTagL1A;
+        using LayoutTagL1B = typename TileCopyAV::LayoutTagL1B;
+        using LayoutTagL0A = typename TileCopyAV::LayoutTagL0A;
+        using LayoutTagL0B = typename TileCopyAV::LayoutTagL0B;
+        using CopyL1ToL0A = typename TileCopyAV::CopyL1ToL0A;
+        using CopyL1ToL0B = typename TileCopyAV::CopyL1ToL0B;
+        using TileMmad = Catlass::Gemm::Tile::TileMmadTla<ArchTag, Element, LayoutTagL1A>;
+
+        LocalTensor<Element> l1APrime =
+            resource_.l1Buf.template GetBufferByByte<Element>(ChunkFwdOL1APrimeOffset(headOffset));
+        LocalTensor<Element> l1V =
+            resource_.l1Buf.template GetBufferByByte<Element>(ChunkFwdOL1VOffset(headOffset));
+        LocalTensor<Element> l0A =
+            resource_.l0ABuf.template GetBufferByByte<Element>(ChunkFwdOL0AOffset(l0ASlot));
+        LocalTensor<Element> l0B =
+            resource_.l0BBuf.template GetBufferByByte<Element>(ChunkFwdOL0BOffset(l0BSlot));
+        LocalTensor<float> l0C = resource_.l0CBuf.template GetBufferByByte<float>(ChunkFwdOL0COffset(l0CSlot));
+
+        auto layoutL1APrime = tla::MakeLayout<Element, LayoutTagL1A>(kBt, kBt);
+        auto layoutL1V = tla::MakeLayout<Element, LayoutTagL1B>(kBt, kV);
+        auto layoutL0A = tla::MakeLayout<Element, LayoutTagL0A>(mActual, kActual);
+        auto layoutL0B = tla::MakeLayout<Element, LayoutTagL0B>(kActual, kV);
+        auto layoutL0C = tla::MakeLayoutL0C(mActual, kV);
+        auto tensorL1APrime = tla::MakeTensor(l1APrime, layoutL1APrime, Catlass::Arch::PositionL1{});
+        auto tensorL1V = tla::MakeTensor(l1V, layoutL1V, Catlass::Arch::PositionL1{});
+        auto tensorL0A = tla::MakeTensor(l0A, layoutL0A, Catlass::Arch::PositionL0A{});
+        auto tensorL0B = tla::MakeTensor(l0B, layoutL0B, Catlass::Arch::PositionL0B{});
+        auto tensorL0C = tla::MakeTensor(l0C, layoutL0C, Catlass::Arch::PositionL0C{});
+        auto tileL1APrime = GetTile(tensorL1APrime, tla::MakeCoord(0, 0), tla::MakeShape(mActual, kActual));
+        auto tileL1V = GetTile(tensorL1V, tla::MakeCoord(0, 0), tla::MakeShape(kActual, kV));
+        auto tileL0A = GetTile(tensorL0A, tla::MakeCoord(0, 0), tla::MakeShape(mActual, kActual));
+        auto tileL0B = GetTile(tensorL0B, tla::MakeCoord(0, 0), tla::MakeShape(kActual, kV));
+        auto tileL0C = GetTile(tensorL0C, tla::MakeCoord(0, 0), tla::MakeShape(mActual, kV));
+
+        WaitFlag<HardEvent::M_MTE1>(L0AEvent(l0ASlot));
+        WaitFlag<HardEvent::M_MTE1>(L0BEvent(l0BSlot));
+        WaitFlag<HardEvent::FIX_M>(l0CSlot);
+        CopyL1ToL0A{}(tileL0A, tileL1APrime);
+        CopyL1ToL0B{}(tileL0B, tileL1V);
+        SetFlag<HardEvent::MTE1_M>(l0CSlot);
+        WaitFlag<HardEvent::MTE1_M>(l0CSlot);
+        TileMmad{}(tileL0C, tensorL0A, tensorL0B, true, 0);
         PipeBarrier<PIPE_M>();
         SetFlag<HardEvent::M_MTE1>(L0AEvent(l0ASlot));
         SetFlag<HardEvent::M_MTE1>(L0BEvent(l0BSlot));

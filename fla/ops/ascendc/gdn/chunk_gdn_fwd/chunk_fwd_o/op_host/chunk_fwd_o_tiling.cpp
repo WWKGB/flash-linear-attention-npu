@@ -36,6 +36,7 @@ static void ChunkFwdOTilingDataPrint(gert::TilingContext *context, const ChunkFw
     OP_LOGD(nodeName, "=== isVariedLen: %ld", tiling.isVariedLen);
     OP_LOGD(nodeName, "=== tokenBatch: %ld", tiling.tokenBatch);
     OP_LOGD(nodeName, "=== useExp2: %ld", tiling.useExp2);
+    OP_LOGD(nodeName, "=== outputLayout: %ld", tiling.outputLayout);
     OP_LOGD(nodeName, "=== chunkNum: %ld", tiling.chunkNum);
     OP_LOGD(nodeName, "=== hvPerHk: %ld", tiling.hvPerHk);
     OP_LOGD(nodeName, "=== taskGroupSize: %ld", tiling.taskGroupSize);
@@ -74,6 +75,7 @@ ge::graphStatus Tiling4ChunkFwdO(gert::TilingContext *context)
     NpuArch npuArch = ascendcPlatform.GetCurNpuArch();
     const bool *useExp2Ptr = attrPtr->GetAttrPointer<bool>(CHUNK_FWD_O_ATTR_USE_EXP2_IDX);
     const bool useExp2 = useExp2Ptr != nullptr ? *useExp2Ptr : false;
+    const char *outputLayout = attrPtr->GetStr(CHUNK_FWD_O_ATTR_OUTPUT_LAYOUT_IDX);
 
     ChunkFwdOTilingContext ctx{
         context->GetNodeName(),
@@ -89,6 +91,7 @@ ge::graphStatus Tiling4ChunkFwdO(gert::TilingContext *context)
         dataType,
         gDataType,
         useExp2,
+        outputLayout,
         npuArch,
         aicCoreNum,
         sysWorkspaceSize,
@@ -96,6 +99,7 @@ ge::graphStatus Tiling4ChunkFwdO(gert::TilingContext *context)
 
     ChunkFwdOTilingProcessor processor(ctx, *tiling);
     OP_CHECK_IF(processor.Process() != ge::GRAPH_SUCCESS, , return ge::GRAPH_FAILED);
+    context->SetTilingKey(processor.GetTilingKey());
 
     if (npuArch == NpuArch::DAV_3510) {
         context->SetScheduleMode(1);

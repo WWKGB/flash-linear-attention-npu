@@ -17,6 +17,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include "exe_graph/runtime/storage_shape.h"
 #include <register/op_impl_registry.h>
 #include "tiling_base/data_copy_transpose_tiling.h"
@@ -40,6 +41,7 @@ static constexpr size_t CHUNK_FWD_O_INPUT_CHUNK_OFFSETS_IDX = 6;
 static constexpr size_t CHUNK_FWD_O_ATTR_SCALE_IDX = 0;
 static constexpr size_t CHUNK_FWD_O_ATTR_CHUNK_SIZE_IDX = 1;
 static constexpr size_t CHUNK_FWD_O_ATTR_USE_EXP2_IDX = 2;
+static constexpr size_t CHUNK_FWD_O_ATTR_OUTPUT_LAYOUT_IDX = 3;
 
 static constexpr int64_t CHUNK_FWD_O_A5_BT = GDN::CHUNK_FWD_O_A5_BT;
 static constexpr int64_t CHUNK_FWD_O_A5_K = GDN::CHUNK_FWD_O_A5_K;
@@ -91,6 +93,7 @@ struct ChunkFwdOTilingContext {
     int64_t dataType;
     int64_t gDataType;
     bool useExp2;
+    const char *outputLayout;
     NpuArch npuArch;
     uint32_t aicCoreNum;
     size_t sysWorkspaceSize;
@@ -110,6 +113,18 @@ public:
     size_t GetWorkspaceSize() const
     {
         return workspaceSize_;
+    }
+
+    bool UseA5Path() const
+    {
+        return ctx_.npuArch == NpuArch::DAV_3510 && ctx_.useExp2 &&
+               (tiling_.outputLayout == GDN::CHUNK_FWD_O_LAYOUT_BSND ||
+                tiling_.outputLayout == GDN::CHUNK_FWD_O_LAYOUT_TND);
+    }
+
+    uint64_t GetTilingKey() const
+    {
+        return UseA5Path() ? GDN::CHUNK_FWD_O_TILING_KEY_A5 : GDN::CHUNK_FWD_O_TILING_KEY_LEGACY;
     }
 
     bool IsVariableLength() const
@@ -283,6 +298,41 @@ public:
         return ge::GRAPH_SUCCESS;
     }
 
+    ge::graphStatus LayoutCheck()
+    {
+        const char *layout = ctx_.outputLayout == nullptr ? "BNSD" : ctx_.outputLayout;
+        if (std::strcmp(layout, "BNSD") == 0) {
+            tiling_.outputLayout = GDN::CHUNK_FWD_O_LAYOUT_BNSD;
+        } else if (std::strcmp(layout, "BSND") == 0) {
+            tiling_.outputLayout = GDN::CHUNK_FWD_O_LAYOUT_BSND;
+        } else if (std::strcmp(layout, "TND") == 0) {
+            tiling_.outputLayout = GDN::CHUNK_FWD_O_LAYOUT_TND;
+        } else if (std::strcmp(layout, "NTD") == 0) {
+            tiling_.outputLayout = GDN::CHUNK_FWD_O_LAYOUT_NTD;
+        } else {
+            OP_LOGE(ctx_.nodeName, "output_layout must be one of BNSD, BSND, TND or NTD, but got %s.", layout);
+            return ge::GRAPH_FAILED;
+        }
+
+        const bool useA5Path =
+            ctx_.useExp2 &&
+            (tiling_.outputLayout == GDN::CHUNK_FWD_O_LAYOUT_BSND ||
+             tiling_.outputLayout == GDN::CHUNK_FWD_O_LAYOUT_TND);
+        const bool useLegacyPath =
+            !ctx_.useExp2 &&
+            (tiling_.outputLayout == GDN::CHUNK_FWD_O_LAYOUT_BNSD ||
+             tiling_.outputLayout == GDN::CHUNK_FWD_O_LAYOUT_NTD);
+        OP_CHECK_IF(!useA5Path && !useLegacyPath,
+                    OP_LOGE(ctx_.nodeName,
+                            "use_exp2=true supports BSND/TND, while use_exp2=false supports BNSD/NTD."),
+                    return ge::GRAPH_FAILED);
+        OP_CHECK_IF(useA5Path && ctx_.npuArch != NpuArch::DAV_3510,
+                    OP_LOGE(ctx_.nodeName,
+                            "use_exp2=true with output_layout=BSND/TND is supported only on A5."),
+                    return ge::GRAPH_FAILED);
+        return ge::GRAPH_SUCCESS;
+    }
+
     static int64_t CeilDiv(int64_t a, int64_t b)
     {
         if (b == 0) {
@@ -366,7 +416,8 @@ public:
         OP_CHECK_IF(ShapeCheck() != ge::GRAPH_SUCCESS, , return ge::GRAPH_FAILED);
         OP_CHECK_IF(CommonTiling() != ge::GRAPH_SUCCESS, , return ge::GRAPH_FAILED);
         tiling_.useExp2 = ctx_.useExp2 ? 1 : 0;
-        if (ctx_.npuArch == NpuArch::DAV_3510) {
+        OP_CHECK_IF(LayoutCheck() != ge::GRAPH_SUCCESS, , return ge::GRAPH_FAILED);
+        if (UseA5Path()) {
             OP_CHECK_IF(A5ShapeCheck() != ge::GRAPH_SUCCESS, , return ge::GRAPH_FAILED);
             OP_CHECK_IF(A5ChunkTiling() != ge::GRAPH_SUCCESS, , return ge::GRAPH_FAILED);
             OP_CHECK_IF(WorkspaceTilingA5() != ge::GRAPH_SUCCESS, , return ge::GRAPH_FAILED);
