@@ -306,10 +306,9 @@ private:
         WaitFlag<HardEvent::MTE1_MTE2>(L1Mte1Mte2Event(l1StreamSlot));
         if (loadQK) {
             LoadQK(loc, hk, l1StreamSlot);
+            SetFlag<HardEvent::MTE2_MTE1>(L1Mte2Mte1Event(l1StreamSlot));
+            WaitFlag<HardEvent::MTE2_MTE1>(L1Mte2Mte1Event(l1StreamSlot));
         }
-        LoadH(loc, hv, l1StreamSlot);
-        SetFlag<HardEvent::MTE2_MTE1>(L1Mte2Mte1Event(l1StreamSlot));
-        WaitFlag<HardEvent::MTE2_MTE1>(L1Mte2Mte1Event(l1StreamSlot));
 
         const uint32_t qktASlot = l0ASlot_;
         const uint32_t qktBSlot = l0BSlot_;
@@ -318,7 +317,12 @@ private:
         l0BSlot_ ^= 1U;
         l0CSlot_ ^= 1U;
         RunGemmQKT(m, l1StreamSlot, qktASlot, qktBSlot, qktCSlot);
+
+        // Q/K have entered L0, so H can use MTE2 while QK runs on M/FIX.
+        LoadH(loc, hv, l1StreamSlot);
+        SetFlag<HardEvent::MTE2_MTE1>(L1Mte2Mte1Event(l1StreamSlot));
         PublishQKT(m, ownerSubBlock, localSlot, qktCSlot);
+        WaitFlag<HardEvent::MTE2_MTE1>(L1Mte2Mte1Event(l1StreamSlot));
 
         const uint32_t qhASlot = l0ASlot_;
         const uint32_t qhBSlot = l0BSlot_;
