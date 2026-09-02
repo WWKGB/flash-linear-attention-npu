@@ -116,6 +116,8 @@ public:
             for (int64_t hvBase = 0; hvBase < tiling_.vNumHead; hvBase += tiling_.taskGroupSize) {
                 const int64_t remaining = tiling_.vNumHead - hvBase;
                 const int64_t taskCount = remaining < tiling_.taskGroupSize ? remaining : tiling_.taskGroupSize;
+                const int64_t groupRound =
+                    ChunkFwdOGroupRound(tiling_, loopIdx, coreIdx, coreNum, hvBase);
                 // Stage 2: consume the Stage 1 ready chain and produce QK/QH
                 // for every HEAD in this task group before entering Stage 4.
                 if ASCEND_IS_AIC {
@@ -143,7 +145,7 @@ public:
                         const uint32_t ownerSubBlock = static_cast<uint32_t>(headOffset % 2);
                         const uint32_t localSlot = static_cast<uint32_t>(headOffset / 2);
                         ProcessStage4Head(loc, hvBase + headOffset, ownerSubBlock, localSlot,
-                                          static_cast<uint32_t>(headOffset), l1StreamSlot_);
+                                          static_cast<uint32_t>(headOffset), groupRound, l1StreamSlot_);
                         l1StreamSlot_ ^= 1U;
                     }
                     // Stage4 uses [256, 352) KiB in L1, which overlaps slot1's Q/K cache.
@@ -177,7 +179,7 @@ private:
     }
 
     __aicore__ inline void LoadStage4Inputs(const ChunkFwdOChunkLoc &loc, int64_t hv, uint32_t headOffset,
-                                            uint32_t l1StreamSlot)
+                                            int64_t groupRound, uint32_t l1StreamSlot)
     {
         const uint32_t m = kBt;
         const uint32_t coreIdx = AscendC::GetBlockIdx();
@@ -187,7 +189,7 @@ private:
 
         GlobalTensor<Element> aPrimeGm;
         aPrimeGm.SetGlobalBuffer(reinterpret_cast<__gm__ Element *>(
-            ChunkFwdOAPrimeGmOffset(workspace_, tiling_, coreIdx, headOffset)));
+            ChunkFwdOAPrimeGmOffset(workspace_, tiling_, coreIdx, groupRound, headOffset)));
         auto layoutAPrimeGm = tla::MakeLayout<Element, LayoutRM>(m, m);
         auto layoutVGm = tla::MakeLayout<Element, LayoutRM>(m, kV);
         auto tensorAPrimeGm = tla::MakeTensor(aPrimeGm, layoutAPrimeGm, Catlass::Arch::PositionGM{});
@@ -218,9 +220,9 @@ private:
 
     __aicore__ inline void ProcessStage4Head(const ChunkFwdOChunkLoc &loc, int64_t hv,
                                              uint32_t ownerSubBlock, uint32_t localSlot,
-                                             uint32_t headOffset, uint32_t l1StreamSlot)
+                                             uint32_t headOffset, int64_t groupRound, uint32_t l1StreamSlot)
     {
-        LoadStage4Inputs(loc, hv, headOffset, l1StreamSlot);
+        LoadStage4Inputs(loc, hv, headOffset, groupRound, l1StreamSlot);
         WaitFlag<HardEvent::MTE2_MTE1>(L1Mte2Mte1Event(l1StreamSlot));
 
         const uint32_t avASlot = l0ASlot_;

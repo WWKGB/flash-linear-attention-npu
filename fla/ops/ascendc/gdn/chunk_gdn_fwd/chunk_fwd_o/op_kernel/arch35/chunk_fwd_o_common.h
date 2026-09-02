@@ -85,12 +85,26 @@ __aicore__ inline uint32_t ChunkFwdOOlOffset(uint32_t slot)
     return CHUNK_FWD_O_UB_LAYOUT_OL_BASE + slot * CHUNK_FWD_O_UB_LAYOUT_OL_SLOT_BYTES;
 }
 
-__aicore__ inline GM_ADDR ChunkFwdOAPrimeGmOffset(GM_ADDR workspace, const ChunkFwdOTilingData &tiling,
-                                                  uint32_t coreIdx, uint32_t aPrimeSlot)
+__aicore__ inline int64_t ChunkFwdOGroupRound(const ChunkFwdOTilingData &tiling, uint32_t loopIdx,
+                                              uint32_t coreIdx, uint32_t coreNum, int64_t hvBase)
 {
+    const int64_t headGroupNum =
+        (tiling.vNumHead + tiling.taskGroupSize - 1) / tiling.taskGroupSize;
+    const int64_t taskRound =
+        (static_cast<int64_t>(loopIdx) - static_cast<int64_t>(coreIdx)) /
+        static_cast<int64_t>(coreNum);
+    return taskRound * headGroupNum + hvBase / tiling.taskGroupSize;
+}
+
+__aicore__ inline GM_ADDR ChunkFwdOAPrimeGmOffset(GM_ADDR workspace, const ChunkFwdOTilingData &tiling,
+                                                  uint32_t coreIdx, int64_t groupRound, uint32_t aPrimeSlot)
+{
+    const uint32_t windowStart =
+        static_cast<uint32_t>(groupRound & 1) * CHUNK_FWD_O_APRIME_HEADS_PER_WINDOW;
+    const uint32_t workspaceSlot = windowStart + aPrimeSlot;
     return workspace + tiling.aPrimeWorkspaceOffset +
            static_cast<int64_t>(coreIdx) * static_cast<int64_t>(CHUNK_FWD_O_APRIME_WORKSPACE_BYTES) +
-           static_cast<int64_t>(aPrimeSlot) * static_cast<int64_t>(CHUNK_FWD_O_APRIME_SLOT_BYTES);
+           static_cast<int64_t>(workspaceSlot) * static_cast<int64_t>(CHUNK_FWD_O_APRIME_SLOT_BYTES);
 }
 
 constexpr uint32_t CHUNK_FWD_O_L1_Q_BASE = 0U;

@@ -83,40 +83,90 @@ __simd_vf__ inline void Stage3Gate64VF(__ubuf__ bfloat16_t *aPrimeAddr, __ubuf__
                                       uint16_t validRows)
 {
     constexpr uint16_t kBt = static_cast<uint16_t>(CHUNK_FWD_O_A5_BT);
-    constexpr uint16_t kTilesPerRow = static_cast<uint16_t>(CHUNK_FWD_O_A5_V / CHUNK_FWD_O_A5_BT);
-    RegTensor<float> aRawReg;
-    RegTensor<float> gateAReg;
-    RegTensor<float> aPrimeReg;
-    RegTensor<bfloat16_t> aPrimeBf16Reg;
+    RegTensor<float> zeroReg;
+    MaskReg floatMask = CreateMask<float, MaskPattern::ALL>();
+    Duplicate(zeroReg, 0.0f, floatMask);
+
+    {
+        MaskReg lowerMask0;
+        RegTensor<float> aRawReg0;
+        RegTensor<float> aRawReg1;
+        RegTensor<float> gateAReg0;
+        RegTensor<float> gateAReg1;
+        RegTensor<float> aPrimeReg0;
+        RegTensor<float> aPrimeReg1;
+        RegTensor<bfloat16_t> aPrimeBf16Reg0;
+        RegTensor<bfloat16_t> aPrimeBf16Reg1;
+        uint16_t rowLoop = 0;
+        const uint16_t rowLoopCount = validRows / 2U;
+        const uint16_t tailLoopCount = validRows % 2U;
+        const uint16_t tailRowBase = rowLoopCount * 2U;
+        uint16_t rowBase = 0;
+        uint32_t rowOffset0 = 0;
+        uint32_t rowOffset1 = 0;
+        uint32_t lowerCount0 = 0;
+        uint32_t lowerCount1 = 0;
+
+        // The main loop handles complete valid row pairs to expose two
+        // independent load/compute/store chains to the VF scheduler.
+        for (rowLoop = 0; rowLoop < rowLoopCount; ++rowLoop) {
+            rowBase = static_cast<uint16_t>(rowLoop * 2U);
+            rowOffset0 = static_cast<uint32_t>(rowBase) * kBt;
+            rowOffset1 = static_cast<uint32_t>(rowBase + 1U) * kBt;
+            lowerCount0 = static_cast<uint32_t>(rowBase + 1U);
+            lowerCount1 = static_cast<uint32_t>(rowBase + 2U);
+
+            LoadAlign(aRawReg0, aRawAddr + rowOffset0);
+            LoadAlign(gateAReg0, gateAAddr + rowOffset0);
+            Mul(aPrimeReg0, aRawReg0, gateAReg0, floatMask);
+            lowerMask0 = UpdateMask<float>(lowerCount0);
+            Select(aPrimeReg0, aPrimeReg0, zeroReg, lowerMask0);
+            Cast<bfloat16_t, float, CHUNK_FWD_O_FP32_TO_B16_PACK>(aPrimeBf16Reg0, aPrimeReg0, floatMask);
+            StoreAlign<bfloat16_t, StoreDist::DIST_PACK_B32>(aPrimeAddr + rowOffset0, aPrimeBf16Reg0, floatMask);
+
+            LoadAlign(aRawReg1, aRawAddr + rowOffset1);
+            LoadAlign(gateAReg1, gateAAddr + rowOffset1);
+            Mul(aPrimeReg1, aRawReg1, gateAReg1, floatMask);
+            lowerMask0 = UpdateMask<float>(lowerCount1);
+            Select(aPrimeReg1, aPrimeReg1, zeroReg, lowerMask0);
+            Cast<bfloat16_t, float, CHUNK_FWD_O_FP32_TO_B16_PACK>(aPrimeBf16Reg1, aPrimeReg1, floatMask);
+            StoreAlign<bfloat16_t, StoreDist::DIST_PACK_B32>(aPrimeAddr + rowOffset1, aPrimeBf16Reg1, floatMask);
+        }
+
+        for (rowLoop = 0; rowLoop < tailLoopCount; ++rowLoop) {
+            rowBase = static_cast<uint16_t>(tailRowBase + rowLoop);
+            rowOffset0 = static_cast<uint32_t>(rowBase) * kBt;
+            lowerCount0 = static_cast<uint32_t>(rowBase + 1U);
+            lowerMask0 = UpdateMask<float>(lowerCount0);
+            LoadAlign(aRawReg0, aRawAddr + rowOffset0);
+            LoadAlign(gateAReg0, gateAAddr + rowOffset0);
+            Mul(aPrimeReg0, aRawReg0, gateAReg0, floatMask);
+            Select(aPrimeReg0, aPrimeReg0, zeroReg, lowerMask0);
+            Cast<bfloat16_t, float, CHUNK_FWD_O_FP32_TO_B16_PACK>(aPrimeBf16Reg0, aPrimeReg0, floatMask);
+            StoreAlign<bfloat16_t, StoreDist::DIST_PACK_B32>(aPrimeAddr + rowOffset0, aPrimeBf16Reg0, floatMask);
+        }
+
+        Cast<bfloat16_t, float, CHUNK_FWD_O_FP32_TO_B16_PACK>(aPrimeBf16Reg0, zeroReg, floatMask);
+        const uint16_t invalidRowCount = static_cast<uint16_t>(kBt - validRows);
+        for (rowLoop = 0; rowLoop < invalidRowCount; ++rowLoop) {
+            rowBase = static_cast<uint16_t>(validRows + rowLoop);
+            rowOffset0 = static_cast<uint32_t>(rowBase) * kBt;
+            StoreAlign<bfloat16_t, StoreDist::DIST_PACK_B32>(aPrimeAddr + rowOffset0, aPrimeBf16Reg0, floatMask);
+        }
+    }
+
     RegTensor<float> oSRawReg;
     RegTensor<float> gateOVectorReg;
     RegTensor<float> gateORowReg;
-    RegTensor<float> zeroReg;
     RegTensor<uint32_t> rowIndexReg;
-    MaskReg floatMask = CreateMask<float, MaskPattern::ALL>();
-    MaskReg lowerMask;
-    uint32_t lowerCount = 0;
-    Duplicate(zeroReg, 0.0f, floatMask);
     LoadAlign(gateOVectorReg, gateOAddr);
 
     for (uint16_t row = 0; row < kBt; ++row) {
-        const uint32_t matrixOffset = static_cast<uint32_t>(row) * kBt;
-        lowerCount = row < validRows ? static_cast<uint32_t>(row + 1) : 0U;
-        lowerMask = UpdateMask<float>(lowerCount);
-        LoadAlign(aRawReg, aRawAddr + matrixOffset);
-        LoadAlign(gateAReg, gateAAddr + matrixOffset);
-        Mul(aPrimeReg, aRawReg, gateAReg, floatMask);
-        Select(aPrimeReg, aPrimeReg, zeroReg, lowerMask);
-        Cast<bfloat16_t, float, CHUNK_FWD_O_FP32_TO_B16_PACK>(aPrimeBf16Reg, aPrimeReg, floatMask);
-        StoreAlign<bfloat16_t, StoreDist::DIST_PACK_B32>(
-            aPrimeAddr + matrixOffset, aPrimeBf16Reg, floatMask);
-
         Duplicate(rowIndexReg, static_cast<uint32_t>(row), floatMask);
         Gather(gateORowReg, gateOVectorReg, rowIndexReg);
-        for (uint16_t tile = 0; tile < kTilesPerRow; ++tile) {
-            const uint32_t offset =
-                static_cast<uint32_t>(row) * static_cast<uint16_t>(CHUNK_FWD_O_A5_V) +
-                static_cast<uint32_t>(tile) * kBt;
+        for (uint16_t tile = 0; tile < CHUNK_FWD_O_A5_V / CHUNK_FWD_O_A5_BT; ++tile) {
+            const uint32_t offset = static_cast<uint32_t>(row) * static_cast<uint16_t>(CHUNK_FWD_O_A5_V) +
+                                    static_cast<uint32_t>(tile) * kBt;
             if (row < validRows) {
                 LoadAlign(oSRawReg, oSRawAddr + offset);
                 Mul(oSRawReg, oSRawReg, gateORowReg, floatMask);
@@ -158,8 +208,7 @@ class ChunkFwdOA5VectorProcess {
 public:
     using ArchTag = Catlass::Arch::Ascend950;
 
-    static constexpr uint32_t kStreamBankCount = CHUNK_FWD_O_STREAM_BANK_COUNT;
-    static constexpr uint32_t kLocalSlotCount = 2U;
+    static constexpr uint32_t BANK_COUNT_2  = CHUNK_FWD_O_STREAM_BANK_COUNT;
 
     __aicore__ inline ChunkFwdOA5VectorProcess(GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR h, GM_ADDR g,
                                                GM_ADDR cuSeqlens, GM_ADDR chunkOffsets, GM_ADDR o, GM_ADDR workspace)
@@ -175,19 +224,14 @@ public:
         oGm_.SetGlobalBuffer((__gm__ bfloat16_t *)o_);
 
         pipe_->InitBuffer(ubBuf_, CHUNK_FWD_O_UB_TOTAL_BYTES);
-        for (uint32_t bankIdx = 0; bankIdx < kStreamBankCount; ++bankIdx) {
+        for (uint32_t bankIdx = 0; bankIdx < BANK_COUNT_2; ++bankIdx) {
             mte2ToV_[bankIdx] = pipe_->AllocEventID<HardEvent::MTE2_V>();
             vToMte3Stream_[bankIdx] = pipe_->AllocEventID<HardEvent::V_MTE3>();
             mte3ToVStream_[bankIdx] = pipe_->AllocEventID<HardEvent::MTE3_V>();
-            mte3ToMte2_[bankIdx] = pipe_->AllocEventID<HardEvent::MTE3_MTE2>();
             // No previous MTE3 owns either Stage3 output slot on the first group.
+            vToMte3Event_[bankIdx] = pipe_->AllocEventID<HardEvent::V_MTE3>();
             SetFlag<HardEvent::MTE3_V>(mte3ToVStream_[bankIdx]);
-            SetFlag<HardEvent::MTE3_MTE2>(mte3ToMte2_[bankIdx]);
         }
-        for (uint32_t slotIdx = 0; slotIdx < kLocalSlotCount; ++slotIdx) {
-            gateReadyEvent_[slotIdx] = pipe_->AllocEventID<HardEvent::V_MTE2>();
-        }
-        vToMte3Event_ = pipe_->AllocEventID<HardEvent::V_MTE3>();
     }
 
     // Keep the AIV stage order in one place.  Cross-core and local pipeline
@@ -210,6 +254,8 @@ public:
             for (int64_t hvBase = 0; hvBase < tiling_.vNumHead; hvBase += tiling_.taskGroupSize) {
                 const int64_t remaining = tiling_.vNumHead - hvBase;
                 const int64_t taskCount = remaining < tiling_.taskGroupSize ? remaining : tiling_.taskGroupSize;
+                const int64_t groupRound =
+                    ChunkFwdOGroupRound(tiling_, loopIdx, coreIdx, coreNum, hvBase);
 
                 // Stage 1: prepare gate_o/gate_A for every owner HEAD. The
                 // producer/consumer events stay at the exact transfer site.
@@ -219,44 +265,39 @@ public:
                     if (ownerSubBlock != subBlockIdx) {
                         continue;
                     }
-                    const uint32_t localSlot = static_cast<uint32_t>(headOffset / 2);
-                    WaitFlag<HardEvent::MTE3_MTE2>(mte3ToMte2_[streamSlot_]);
+                    // SetFlag<HardEvent::V_MTE2>(mte2ToV_[streamSlot_]);
+                    // WaitFlag<HardEvent::V_MTE2>(mte2ToV_[streamSlot_]);
                     LoadStage1G(loc, hvBase + headOffset, streamSlot_);
                     SetFlag<HardEvent::MTE2_V>(mte2ToV_[streamSlot_]);
                     WaitFlag<HardEvent::MTE2_V>(mte2ToV_[streamSlot_]);
-                    ComputeStage1Gate(loc, localSlot, streamSlot_);
-                    SetFlag<HardEvent::V_MTE2>(gateReadyEvent_[localSlot]);
+                    ComputeStage1Gate(loc, streamSlot_, streamSlot_);
                     streamSlot_ ^= 1U;
                 }
 
                 // Stage 3: consume one Stage 2 ready per HEAD. Both subblocks
                 // participate in the handshake; only the owner executes the
                 // VF and writes A-prime to GM.
-                stage3StreamSlot_ = 0U;
-                stage3ActiveMask_ = 0U;
+                // Select the first Stage3 ping-pong UB slot for this task group.
+                streamSlot_ = 0U;
                 for (int64_t headOffset = 0; headOffset < taskCount; ++headOffset) {
                     const uint32_t ownerSubBlock = static_cast<uint32_t>(headOffset % 2);
-                    const uint32_t localSlot = static_cast<uint32_t>(headOffset / 2);
                     Catlass::Arch::CrossCoreWaitFlag(cubeToVecFlag_);
                     if (ownerSubBlock == subBlockIdx) {
-                        WaitFlag<HardEvent::V_MTE2>(gateReadyEvent_[localSlot]);
-                        const uint32_t streamSlot = stage3StreamSlot_;
-                        WaitFlag<HardEvent::MTE3_V>(mte3ToVStream_[streamSlot]);
-
                         LocalTensor<float> gateO =
-                            ubBuf_.GetWithOffset<float>(bt, ChunkFwdOGateOOffset(localSlot));
+                            ubBuf_.GetWithOffset<float>(bt, ChunkFwdOGateOOffset(streamSlot_));
                         LocalTensor<float> gateA =
-                            ubBuf_.GetWithOffset<float>(matrixElems, ChunkFwdOGateAOffset(localSlot));
+                            ubBuf_.GetWithOffset<float>(matrixElems, ChunkFwdOGateAOffset(streamSlot_));
                         LocalTensor<float> aRaw =
-                            ubBuf_.GetWithOffset<float>(matrixElems, ChunkFwdOARawOffset(localSlot));
+                            ubBuf_.GetWithOffset<float>(matrixElems, ChunkFwdOARawOffset(streamSlot_));
                         LocalTensor<float> oSRaw =
-                            ubBuf_.GetWithOffset<float>(bt * vDim, ChunkFwdOOSRawOffset(localSlot));
+                            ubBuf_.GetWithOffset<float>(bt * vDim, ChunkFwdOOSRawOffset(streamSlot_));
                         LocalTensor<float> oSPrime =
-                            ubBuf_.GetWithOffset<float>(bt * vDim, ChunkFwdOOsPrimeOffset(localSlot));
+                            ubBuf_.GetWithOffset<float>(bt * vDim, ChunkFwdOOsPrimeOffset(streamSlot_));
                         LocalTensor<bfloat16_t> aPrimeBf16 =
                             ubBuf_.GetWithOffset<bfloat16_t>(matrixElems,
-                                                             ChunkFwdOAPrimeBf16Offset(streamSlot));
-
+                                                             ChunkFwdOAPrimeBf16Offset(streamSlot_));
+                        WaitFlag<HardEvent::MTE3_V>(mte3ToVStream_[streamSlot_]);
+                        PipeBarrier<PIPE_V>();
                         AscendC::VF_CALL<Stage3Gate64VF>(
                             reinterpret_cast<__ubuf__ bfloat16_t *>(aPrimeBf16.GetPhyAddr()),
                             reinterpret_cast<__ubuf__ float *>(oSPrime.GetPhyAddr()),
@@ -265,39 +306,28 @@ public:
                             reinterpret_cast<__ubuf__ float *>(gateA.GetPhyAddr()),
                             reinterpret_cast<__ubuf__ float *>(gateO.GetPhyAddr()),
                             static_cast<uint16_t>(loc.chunkLen));
-                        PipeBarrier<PIPE_V>();
-                        SetFlag<HardEvent::V_MTE3>(vToMte3Stream_[streamSlot]);
-                        WaitFlag<HardEvent::V_MTE3>(vToMte3Stream_[streamSlot]);
+                        SetFlag<HardEvent::V_MTE3>(vToMte3Stream_[streamSlot_]);
+                        WaitFlag<HardEvent::V_MTE3>(vToMte3Stream_[streamSlot_]);
 
                         const uint32_t aivCoreIdx = AscendC::GetBlockIdx() / 2U;
                         GM_ADDR aPrimeAddr =
-                            ChunkFwdOAPrimeGmOffset(workspace_, tiling_, aivCoreIdx, headOffset);
+                            ChunkFwdOAPrimeGmOffset(workspace_, tiling_, aivCoreIdx, groupRound, headOffset);
                         GlobalTensor<bfloat16_t> aPrimeGm;
                         aPrimeGm.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t *>(aPrimeAddr));
                         DataCopyExtParams aPrimeCopyParams{1, CHUNK_FWD_O_APRIME_SLOT_BYTES, 0, 0, 0};
                         DataCopyPad(aPrimeGm, aPrimeBf16, aPrimeCopyParams);
 
-                        SetFlag<HardEvent::MTE3_MTE2>(mte3ToMte2_[streamSlot]);
-                        SetFlag<HardEvent::MTE3_V>(mte3ToVStream_[streamSlot]);
-                        stage3ActiveMask_ |= 1U << streamSlot;
-                        stage3StreamSlot_ ^= 1U;
+                        SetFlag<HardEvent::MTE3_V>(mte3ToVStream_[streamSlot_]);
+                        streamSlot_ ^= 1U;
                     }
                     Catlass::Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecToCubeFlag_);
                 }
-                for (uint32_t streamSlot = 0; streamSlot < kStreamBankCount; ++streamSlot) {
-                    if ((stage3ActiveMask_ & (1U << streamSlot)) == 0U) {
-                        continue;
-                    }
-                    WaitFlag<HardEvent::MTE3_V>(mte3ToVStream_[streamSlot]);
-                    SetFlag<HardEvent::MTE3_V>(mte3ToVStream_[streamSlot]);
-                }
-                stage3ActiveMask_ = 0U;
 
                 // Stage 5: consume one Stage 4 ready per HEAD, then publish
                 // the final output only from the owning subblock.
+                streamSlot_ = 0U;
                 for (int64_t headOffset = 0; headOffset < taskCount; ++headOffset) {
                     const uint32_t ownerSubBlock = static_cast<uint32_t>(headOffset % 2);
-                    const uint32_t localSlot = static_cast<uint32_t>(headOffset / 2);
                     const int64_t hv = hvBase + headOffset;
                     Catlass::Arch::CrossCoreWaitFlag(cubeToVecFlag_);
                     if (ownerSubBlock != subBlockIdx) {
@@ -305,19 +335,20 @@ public:
                     }
 
                     LocalTensor<float> oSPrime =
-                        ubBuf_.GetWithOffset<float>(bt * vDim, ChunkFwdOOsPrimeOffset(localSlot));
+                        ubBuf_.GetWithOffset<float>(bt * vDim, ChunkFwdOOsPrimeOffset(streamSlot_));
                     LocalTensor<float> oL =
-                        ubBuf_.GetWithOffset<float>(bt * vDim, ChunkFwdOOlOffset(localSlot));
+                        ubBuf_.GetWithOffset<float>(bt * vDim, ChunkFwdOOlOffset(streamSlot_));
                     LocalTensor<bfloat16_t> oOut =
-                        ubBuf_.GetWithOffset<bfloat16_t>(bt * vDim, ChunkFwdOOlOffset(localSlot));
+                        ubBuf_.GetWithOffset<bfloat16_t>(bt * vDim, ChunkFwdOOlOffset(streamSlot_));
+                    WaitFlag<HardEvent::MTE3_V>(mte3ToVStream_[streamSlot_]);
+                    PipeBarrier<PIPE_V>();
                     AscendC::VF_CALL<Stage5Fuse64VF>(
                         reinterpret_cast<__ubuf__ bfloat16_t *>(oOut.GetPhyAddr()),
                         reinterpret_cast<__ubuf__ float *>(oSPrime.GetPhyAddr()),
                         reinterpret_cast<__ubuf__ float *>(oL.GetPhyAddr()), tiling_.scale,
                         static_cast<uint16_t>(loc.chunkLen));
-                    PipeBarrier<PIPE_V>();
-                    SetFlag<HardEvent::V_MTE3>(vToMte3Event_);
-                    WaitFlag<HardEvent::V_MTE3>(vToMte3Event_);
+                    SetFlag<HardEvent::V_MTE3>(vToMte3Event_[streamSlot_]);
+                    WaitFlag<HardEvent::V_MTE3>(vToMte3Event_[streamSlot_]);
                     const int64_t oOffset = ChunkFwdOOOffset(tiling_, loc, hv);
                     DataCopyExtParams outputCopyParams{
                         static_cast<uint16_t>(loc.chunkLen),
@@ -326,9 +357,17 @@ public:
                         static_cast<uint32_t>((tiling_.vNumHead - 1) * vDim * sizeof(bfloat16_t)),
                         0};
                     DataCopyPad(oGm_[oOffset], oOut, outputCopyParams);
+                    SetFlag<HardEvent::MTE3_V>(mte3ToVStream_[streamSlot_]);
+                    streamSlot_ ^= 1U;
                 }
                 Catlass::Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecToCubeFlag_);
             }
+        }
+
+        // Reuse waits consume the preceding MTE3 completion directly. Only
+        // the last completion of each slot needs to be drained at kernel end.
+        for (uint32_t streamSlot = 0; streamSlot < BANK_COUNT_2; ++streamSlot) {
+            WaitFlag<HardEvent::MTE3_V>(mte3ToVStream_[streamSlot]);
         }
     }
 
@@ -403,14 +442,10 @@ private:
     TBuf<TPosition::VECCALC> ubBuf_;
     GlobalTensor<bfloat16_t> oGm_;
     uint32_t streamSlot_ = 0;
-    uint32_t stage3StreamSlot_ = 0;
-    uint32_t stage3ActiveMask_ = 0;
-    TEventID mte2ToV_[kStreamBankCount];
-    TEventID vToMte3Stream_[kStreamBankCount];
-    TEventID mte3ToVStream_[kStreamBankCount];
-    TEventID mte3ToMte2_[kStreamBankCount];
-    TEventID gateReadyEvent_[kLocalSlotCount];
-    TEventID vToMte3Event_ = 0;
+    TEventID mte2ToV_[BANK_COUNT_2];
+    TEventID vToMte3Stream_[BANK_COUNT_2];
+    TEventID mte3ToVStream_[BANK_COUNT_2];
+    TEventID vToMte3Event_[BANK_COUNT_2];
     Catlass::Arch::CrossCoreFlag vecToCubeFlag_{CHUNK_FWD_O_VEC_TO_CUBE_READY_FLAG};
     Catlass::Arch::CrossCoreFlag cubeToVecFlag_{CHUNK_FWD_O_CUBE_TO_VEC_READY_FLAG};
 };
