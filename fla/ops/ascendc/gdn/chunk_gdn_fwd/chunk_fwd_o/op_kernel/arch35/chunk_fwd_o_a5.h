@@ -27,12 +27,6 @@ namespace GDN {
 template <typename GT, bool UseExp2>
 class ChunkFwdOA5 {
 public:
-    static constexpr bool kEnableStage1 = true;
-    static constexpr bool kEnableStage2 = true;
-    static constexpr bool kEnableStage3 = true;
-    static constexpr bool kEnableStage4 = true;
-    static constexpr bool kEnableStage5 = true;
-
     __aicore__ inline void Init(GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR h, GM_ADDR g, GM_ADDR cuSeqlens,
                                 GM_ADDR chunkOffsets, GM_ADDR o, GM_ADDR workspace,
                                 const ChunkFwdOTilingData *tilingData)
@@ -61,112 +55,18 @@ public:
             ChunkFwdOA5VectorProcess<GT, UseExp2> vector(q_, k_, v_, h_, g_, cuSeqlens_, chunkOffsets_, o_,
                                                        workspace_);
             vector.Init(tiling_, &pipe);
-            if constexpr (kEnableStage1) {
-                RunAivStages(vector, aivCoreIdx, aivCoreNum);
-            }
+            vector.Process(aivCoreIdx, aivCoreNum);
             return;
         }
 
         if ASCEND_IS_AIC {
-            if constexpr (kEnableStage2 || kEnableStage4) {
-                ChunkFwdOA5CubeProcess cube(q_, k_, v_, h_, g_, cuSeqlens_, chunkOffsets_, o_, workspace_);
-                cube.Init(tiling_);
-                RunStage2Aic(cube, aicCoreIdx, aicCoreNum);
-            }
+            ChunkFwdOA5CubeProcess cube(q_, k_, v_, h_, g_, cuSeqlens_, chunkOffsets_, o_, workspace_);
+            cube.Init(tiling_);
+            cube.Process(aicCoreIdx, aicCoreNum);
         }
     }
 
 private:
-    __aicore__ inline void RunAivStages(ChunkFwdOA5VectorProcess<GT, UseExp2> &vector, uint32_t coreIdx,
-                                       uint32_t coreNum)
-    {
-        ChunkFwdOChunkLoc loc;
-        for (uint32_t loopIdx = 0; loopIdx < static_cast<uint32_t>(tiling_.chunkNum); ++loopIdx) {
-            ChunkFwdOResolveChunkLoc(cuSeqlens_, chunkOffsets_, tiling_, loopIdx, loc);
-            const bool owns = (coreIdx == (loopIdx % coreNum));
-            if (!owns) {
-                continue;
-            }
-            const uint32_t subBlockIdx = AscendC::GetSubBlockIdx();
-            for (int64_t hvBase = 0; hvBase < tiling_.vNumHead; hvBase += tiling_.taskGroupSize) {
-                const int64_t remaining = tiling_.vNumHead - hvBase;
-                const int64_t taskCount = remaining < tiling_.taskGroupSize ? remaining : tiling_.taskGroupSize;
-
-                // PR404-style stage round: both subblocks walk every headOffset;
-                // only the owner computes. Stages with a cube consumer use mode=0x2.
-                vector.BeginStage1Group();
-                for (int64_t headOffset = 0; headOffset < taskCount; ++headOffset) {
-                    const uint32_t ownerSubBlock = static_cast<uint32_t>(headOffset % 2);
-                    if (ownerSubBlock == subBlockIdx) {
-                        vector.ProcessStage1Head(loc, hvBase, headOffset);
-                    }
-                }
-
-                if constexpr (kEnableStage2) {
-                    if constexpr (kEnableStage3) {
-                        vector.BeginStage3Group();
-                    }
-                    for (int64_t headOffset = 0; headOffset < taskCount; ++headOffset) {
-                        const uint32_t ownerSubBlock = static_cast<uint32_t>(headOffset % 2);
-                        const uint32_t localSlot = static_cast<uint32_t>(headOffset / 2);
-                        vector.WaitStage2Ready();
-                        if (ownerSubBlock == subBlockIdx) {
-                            if constexpr (kEnableStage3) {
-                                vector.ProcessStage3(loc, localSlot, static_cast<uint32_t>(headOffset));
-                            }
-                        }
-                        if constexpr (kEnableStage4) {
-                            vector.SignalStage3Ready();
-                        }
-                    }
-                    if constexpr (kEnableStage3) {
-                        vector.FinishStage3Group();
-                    }
-                }
-
-                if constexpr (kEnableStage4) {
-                    for (int64_t headOffset = 0; headOffset < taskCount; ++headOffset) {
-                        const uint32_t ownerSubBlock = static_cast<uint32_t>(headOffset % 2);
-                        const uint32_t localSlot = static_cast<uint32_t>(headOffset / 2);
-                        const int64_t hv = hvBase + headOffset;
-                        vector.WaitStage4Ready();
-                        if (ownerSubBlock == subBlockIdx) {
-                            if constexpr (kEnableStage5) {
-                                vector.ProcessStage5(loc, hv, localSlot);
-                            }
-                        }
-                    }
-                }
-                if constexpr (kEnableStage2 || kEnableStage4) {
-                    vector.ReleaseStage2Group();
-                }
-            }
-        }
-    }
-
-    __aicore__ inline void RunStage2Aic(ChunkFwdOA5CubeProcess &cube, uint32_t coreIdx, uint32_t coreNum)
-    {
-        ChunkFwdOChunkLoc loc;
-        for (uint32_t loopIdx = 0; loopIdx < static_cast<uint32_t>(tiling_.chunkNum); ++loopIdx) {
-            ChunkFwdOResolveChunkLoc(cuSeqlens_, chunkOffsets_, tiling_, loopIdx, loc);
-            const bool owns = (coreIdx == (loopIdx % coreNum));
-            if (!owns) {
-                continue;
-            }
-            for (int64_t hvBase = 0; hvBase < tiling_.vNumHead; hvBase += tiling_.taskGroupSize) {
-                const int64_t remaining = tiling_.vNumHead - hvBase;
-                const int64_t taskCount = remaining < tiling_.taskGroupSize ? remaining : tiling_.taskGroupSize;
-                if constexpr (kEnableStage2) {
-                    cube.ProcessStage2Group(loopIdx, loc, hvBase, taskCount);
-                }
-                if constexpr (kEnableStage4) {
-                    cube.ProcessStage4Group(loopIdx, loc, hvBase, taskCount);
-                }
-                cube.WaitStage2GroupRelease();
-            }
-        }
-    }
-
     GM_ADDR q_ = nullptr;
     GM_ADDR k_ = nullptr;
     GM_ADDR v_ = nullptr;

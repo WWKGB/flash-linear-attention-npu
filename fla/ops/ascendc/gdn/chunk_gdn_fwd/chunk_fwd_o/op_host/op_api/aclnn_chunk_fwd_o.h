@@ -26,8 +26,8 @@ extern "C" {
  * chunkOffsetsOptional : optional
  * scale : required
  * chunkSize : required
- * useExp2 : required
- * outputLayout : required
+ * useExp2 : optional
+ * outputLayout : optional
  * oOut : required
  * workspaceSize : size of workspace(output).
  * executor : executor context(output).

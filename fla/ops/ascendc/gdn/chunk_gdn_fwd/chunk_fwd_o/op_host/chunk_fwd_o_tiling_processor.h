@@ -375,7 +375,6 @@ public:
     {
         const size_t aPrimeBytes =
             static_cast<size_t>(ctx_.aicCoreNum) * static_cast<size_t>(GDN::CHUNK_FWD_O_APRIME_WORKSPACE_BYTES);
-
         tiling_.aPrimeWorkspaceOffset = 0;
         workspaceSize_ = ctx_.sysWorkspaceSize + aPrimeBytes;
         return ge::GRAPH_SUCCESS;

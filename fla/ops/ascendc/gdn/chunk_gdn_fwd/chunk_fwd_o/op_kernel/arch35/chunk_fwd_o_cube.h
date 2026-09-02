@@ -105,63 +105,54 @@ public:
         }
     }
 
-    __aicore__ inline void ProcessStage2Group(uint32_t loopIdx, const ChunkFwdOChunkLoc &loc, int64_t hvBase,
-                                              int64_t taskCount)
+    __aicore__ inline void Process(uint32_t coreIdx, uint32_t coreNum)
     {
-        if ASCEND_IS_AIV {
-            return;
-        }
-        if (taskCount <= 0) {
-            return;
-        }
+        ChunkFwdOChunkLoc loc;
+        for (uint32_t loopIdx = 0; loopIdx < static_cast<uint32_t>(tiling_.chunkNum); ++loopIdx) {
+            ChunkFwdOResolveChunkLoc(cuSeqlens_, chunkOffsets_, tiling_, loopIdx, loc);
+            if (coreIdx != (loopIdx % coreNum)) {
+                continue;
+            }
+            for (int64_t hvBase = 0; hvBase < tiling_.vNumHead; hvBase += tiling_.taskGroupSize) {
+                const int64_t remaining = tiling_.vNumHead - hvBase;
+                const int64_t taskCount = remaining < tiling_.taskGroupSize ? remaining : tiling_.taskGroupSize;
+                // Stage 2: consume the Stage 1 ready chain and produce QK/QH
+                // for every HEAD in this task group before entering Stage 4.
+                if ASCEND_IS_AIC {
+                    l1StreamSlot_ = 0U;
+                    for (int64_t headOffset = 0; headOffset < taskCount; ++headOffset) {
+                        const int64_t hv = hvBase + headOffset;
+                        const int64_t hk = hv / tiling_.hvPerHk;
+                        const uint32_t ownerSubBlock = static_cast<uint32_t>(headOffset % 2);
+                        const uint32_t localSlot = static_cast<uint32_t>(headOffset / 2);
+                        const bool loadQK = cachedLoopIdx_[l1StreamSlot_] != loopIdx ||
+                                            cachedHk_[l1StreamSlot_] != hk;
+                        ProcessStage2Head(loc, hk, hv, ownerSubBlock, localSlot, l1StreamSlot_, loadQK);
+                        cachedLoopIdx_[l1StreamSlot_] = loopIdx;
+                        cachedHk_[l1StreamSlot_] = hk;
+                        l1StreamSlot_ ^= 1U;
+                    }
+                }
 
-        l1StreamSlot_ = 0U;
-        for (int64_t headOffset = 0; headOffset < taskCount; ++headOffset) {
-            const int64_t hv = hvBase + headOffset;
-            const int64_t hk = hv / tiling_.hvPerHk;
-            const uint32_t ownerSubBlock = static_cast<uint32_t>(headOffset % 2);
-            const uint32_t localSlot = static_cast<uint32_t>(headOffset / 2);
-            const bool loadQK = cachedLoopIdx_[l1StreamSlot_] != loopIdx || cachedHk_[l1StreamSlot_] != hk;
-            ProcessStage2Head(loc, hk, hv, ownerSubBlock, localSlot, l1StreamSlot_, loadQK);
-            cachedLoopIdx_[l1StreamSlot_] = loopIdx;
-            cachedHk_[l1StreamSlot_] = hk;
-            l1StreamSlot_ ^= 1U;
+                // Stage 4: consume Stage 3 A-prime ready signals, compute
+                // A-prime@V, and publish O_l for every HEAD in this group.
+                if ASCEND_IS_AIC {
+                    l1StreamSlot_ = 0U;
+                    for (int64_t headOffset = 0; headOffset < taskCount; ++headOffset) {
+                        Catlass::Arch::CrossCoreWaitFlag(vecToCubeFlag_);
+                        const uint32_t ownerSubBlock = static_cast<uint32_t>(headOffset % 2);
+                        const uint32_t localSlot = static_cast<uint32_t>(headOffset / 2);
+                        ProcessStage4Head(loc, hvBase + headOffset, ownerSubBlock, localSlot,
+                                          static_cast<uint32_t>(headOffset), l1StreamSlot_);
+                        l1StreamSlot_ ^= 1U;
+                    }
+                    // Stage4 uses [256, 352) KiB in L1, which overlaps slot1's Q/K cache.
+                    cachedLoopIdx_[1] = static_cast<uint32_t>(-1);
+                    cachedHk_[1] = -1;
+                }
+                Catlass::Arch::CrossCoreWaitFlag(vecToCubeFlag_);
+            }
         }
-    }
-
-    __aicore__ inline void WaitStage2GroupRelease()
-    {
-        Catlass::Arch::CrossCoreWaitFlag(vecToCubeFlag_);
-    }
-
-    __aicore__ inline void ProcessStage4Group(uint32_t loopIdx, const ChunkFwdOChunkLoc &loc, int64_t hvBase,
-                                              int64_t taskCount)
-    {
-        if ASCEND_IS_AIV {
-            return;
-        }
-        (void)loopIdx;
-        if (taskCount <= 0) {
-            return;
-        }
-
-        l1StreamSlot_ = 0U;
-        for (int64_t headOffset = 0; headOffset < taskCount; ++headOffset) {
-            WaitStage3Ready();
-            const uint32_t ownerSubBlock = static_cast<uint32_t>(headOffset % 2);
-            const uint32_t localSlot = static_cast<uint32_t>(headOffset / 2);
-            ProcessStage4Head(loc, hvBase + headOffset, ownerSubBlock, localSlot,
-                              static_cast<uint32_t>(headOffset), l1StreamSlot_);
-            l1StreamSlot_ ^= 1U;
-        }
-        // Stage4 uses [256, 352) KiB in L1, which overlaps slot1's Q/K cache.
-        cachedLoopIdx_[1] = static_cast<uint32_t>(-1);
-        cachedHk_[1] = -1;
-    }
-
-    __aicore__ inline void WaitStage3Ready()
-    {
-        Catlass::Arch::CrossCoreWaitFlag(vecToCubeFlag_);
     }
 
 private:
@@ -306,10 +297,9 @@ private:
         WaitFlag<HardEvent::MTE1_MTE2>(L1Mte1Mte2Event(l1StreamSlot));
         if (loadQK) {
             LoadQK(loc, hk, l1StreamSlot);
+            SetFlag<HardEvent::MTE2_MTE1>(L1Mte2Mte1Event(l1StreamSlot));
+            WaitFlag<HardEvent::MTE2_MTE1>(L1Mte2Mte1Event(l1StreamSlot));
         }
-        LoadH(loc, hv, l1StreamSlot);
-        SetFlag<HardEvent::MTE2_MTE1>(L1Mte2Mte1Event(l1StreamSlot));
-        WaitFlag<HardEvent::MTE2_MTE1>(L1Mte2Mte1Event(l1StreamSlot));
 
         const uint32_t qktASlot = l0ASlot_;
         const uint32_t qktBSlot = l0BSlot_;
@@ -318,7 +308,12 @@ private:
         l0BSlot_ ^= 1U;
         l0CSlot_ ^= 1U;
         RunGemmQKT(m, l1StreamSlot, qktASlot, qktBSlot, qktCSlot);
+
+        // Q/K have entered L0, so H can use MTE2 while QK runs on M/FIX.
+        LoadH(loc, hv, l1StreamSlot);
+        SetFlag<HardEvent::MTE2_MTE1>(L1Mte2Mte1Event(l1StreamSlot));
         PublishQKT(m, ownerSubBlock, localSlot, qktCSlot);
+        WaitFlag<HardEvent::MTE2_MTE1>(L1Mte2Mte1Event(l1StreamSlot));
 
         const uint32_t qhASlot = l0ASlot_;
         const uint32_t qhBSlot = l0BSlot_;
