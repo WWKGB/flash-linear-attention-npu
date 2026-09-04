@@ -116,10 +116,14 @@ public:
                 for (int64_t headOffset = 0; headOffset < taskCount; ++headOffset) {
                     const int64_t hv = hvBase + headOffset;
                     const int64_t hk = hv / tiling_.hvPerHk;
+                    const int64_t firstHvForHk = hk * tiling_.hvPerHk;
+                    const int64_t firstHvInGroup = firstHvForHk < hvBase ? hvBase : firstHvForHk;
+                    const uint32_t qkL1Slot = static_cast<uint32_t>(firstHvInGroup - hvBase);
+                    const bool loadQK = hv == firstHvInGroup;
                     const uint32_t ownerSubBlock = static_cast<uint32_t>(headOffset % 2);
                     const uint32_t localSlot = static_cast<uint32_t>(headOffset / 2);
-                    ProcessStage2Head(loc, hk, hv, ownerSubBlock, localSlot,
-                                      static_cast<uint32_t>(headOffset));
+                    ProcessStage2Head(loc, hk, hv, ownerSubBlock, localSlot, qkL1Slot,
+                                      static_cast<uint32_t>(headOffset), loadQK);
                 }
             }
 
@@ -281,16 +285,16 @@ private:
 
     __aicore__ inline void ProcessStage2Head(const ChunkFwdOChunkLoc &loc, int64_t hk, int64_t hv,
                                              uint32_t ownerSubBlock, uint32_t localSlot,
-                                             uint32_t l1HeadSlot)
+                                             uint32_t qkL1Slot, uint32_t hL1Slot, bool loadQK)
     {
         const uint32_t m = kBt;
         const uint32_t mActual = static_cast<uint32_t>(loc.chunkLen);
-        const TEventID qkEvent = L1Event(l1HeadSlot);
-        const TEventID hEvent = L1Event(kL1ResidentHeadCount + l1HeadSlot);
+        const TEventID qkEvent = L1Event(qkL1Slot);
+        const TEventID hEvent = L1Event(kL1ResidentHeadCount + hL1Slot);
 
-        // Load Q and K into the current HEAD's resident L1 slot.
-        WaitFlag<HardEvent::MTE1_MTE2>(qkEvent);
-        {
+        // Load Q and K once for all GVA HEADs that share the same HK in this group.
+        if (loadQK) {
+            WaitFlag<HardEvent::MTE1_MTE2>(qkEvent);
             const int64_t qOffset = ChunkFwdOQKOffset(tiling_, loc, hk);
             const int64_t kOffset = ChunkFwdOQKOffset(tiling_, loc, hk);
             using LayoutTagL1Q = typename TileCopyQK::LayoutTagL1A;
@@ -304,9 +308,9 @@ private:
             using CopyGmToL1Q = typename TileCopyQK::template CopyGmToL1A<decltype(blockQ)>;
             using CopyGmToL1K = typename TileCopyQK::template CopyGmToL1B<decltype(blockK)>;
             LocalTensor<Element> l1Q =
-                resource_.l1Buf.template GetBufferByByte<Element>(ChunkFwdOL1QOffset(l1HeadSlot));
+                resource_.l1Buf.template GetBufferByByte<Element>(ChunkFwdOL1QOffset(qkL1Slot));
             LocalTensor<Element> l1K =
-                resource_.l1Buf.template GetBufferByByte<Element>(ChunkFwdOL1KOffset(l1HeadSlot));
+                resource_.l1Buf.template GetBufferByByte<Element>(ChunkFwdOL1KOffset(qkL1Slot));
             auto layoutL1Q = tla::MakeLayout<Element, LayoutTagL1Q>(m, kK);
             auto layoutL1K = tla::MakeLayout<Element, LayoutTagL1K>(kK, m);
             auto tensorL1Q = tla::MakeTensor(l1Q, layoutL1Q, Catlass::Arch::PositionL1{});
@@ -332,9 +336,9 @@ private:
         using CopyQkL1ToL0B = typename TileCopyQK::CopyL1ToL0B;
         using QkTileMmad = Catlass::Gemm::Tile::TileMmadTla<ArchTag, Element, LayoutTagQkL1A>;
         LocalTensor<Element> l1Q =
-            resource_.l1Buf.template GetBufferByByte<Element>(ChunkFwdOL1QOffset(l1HeadSlot));
+            resource_.l1Buf.template GetBufferByByte<Element>(ChunkFwdOL1QOffset(qkL1Slot));
         LocalTensor<Element> l1K =
-            resource_.l1Buf.template GetBufferByByte<Element>(ChunkFwdOL1KOffset(l1HeadSlot));
+            resource_.l1Buf.template GetBufferByByte<Element>(ChunkFwdOL1KOffset(qkL1Slot));
         LocalTensor<Element> qktL0A =
             resource_.l0ABuf.template GetBufferByByte<Element>(ChunkFwdOL0AOffset(qktASlot));
         LocalTensor<Element> qktL0B =
@@ -376,7 +380,7 @@ private:
         auto blockH = GetTile(tensorHGm, tla::MakeCoord(0, 0), tla::MakeShape(kK, kV));
         using CopyGmToL1H = typename TileCopyQH::template CopyGmToL1B<decltype(blockH)>;
         LocalTensor<Element> l1H =
-            resource_.l1Buf.template GetBufferByByte<Element>(ChunkFwdOL1HOffset(l1HeadSlot));
+            resource_.l1Buf.template GetBufferByByte<Element>(ChunkFwdOL1HOffset(hL1Slot));
         auto layoutL1H = tla::MakeLayout<Element, LayoutTagL1H>(kK, kV);
         auto tensorL1H = tla::MakeTensor(l1H, layoutL1H, Catlass::Arch::PositionL1{});
         CopyGmToL1H{}(tensorL1H, blockH);
@@ -460,7 +464,9 @@ private:
         copyQhToUb(tensorOSRawUb, qhTile, static_cast<uint8_t>(ownerSubBlock), 0);
         SetFlag<HardEvent::FIX_M>(qhCSlot);
 
-        SetFlag<HardEvent::MTE1_MTE2>(qkEvent);
+        if (loadQK) {
+            SetFlag<HardEvent::MTE1_MTE2>(qkEvent);
+        }
         SetFlag<HardEvent::MTE1_MTE2>(hEvent);
 
         Catlass::Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(cubeToVecFlag_);
