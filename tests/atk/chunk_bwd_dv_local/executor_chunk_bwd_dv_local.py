@@ -72,7 +72,7 @@ def _chunk_bwd_dv_local_ref(inputs):
             for start, end in _chunks(T, chunk_size):
                 score = torch.matmul(k[b, hk, start:end].to(calc), q[b, hk, start:end].to(calc).t()) * float(inputs["scale"])
                 g_chunk = g[b, hv, start:end].to(calc)
-                gate = torch.exp(g_chunk[None, :] - g_chunk[:, None])
+                gate = torch.exp(torch.clamp(g_chunk[None, :] - g_chunk[:, None], max=0.0))
                 mask = torch.triu(torch.ones_like(score))
                 out[b, hv, start:end] = torch.matmul(score * gate * mask, do[b, hv, start:end].to(calc))
     return out.to(do.dtype)
