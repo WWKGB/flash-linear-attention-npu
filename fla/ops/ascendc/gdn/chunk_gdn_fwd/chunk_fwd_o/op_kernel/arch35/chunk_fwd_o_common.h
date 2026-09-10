@@ -29,10 +29,13 @@ constexpr uint32_t CHUNK_FWD_O_UB_LAYOUT_ARAW_BASE = 99328U;
 constexpr uint32_t CHUNK_FWD_O_UB_LAYOUT_ARAW_SLOT_BYTES = 16U * 1024U;
 constexpr uint32_t CHUNK_FWD_O_UB_LAYOUT_OL_BASE = 132096U;
 constexpr uint32_t CHUNK_FWD_O_UB_LAYOUT_OL_SLOT_BYTES = 32U * 1024U;
-constexpr uint32_t CHUNK_FWD_O_UB_APRIME_FP32_OFFSET = 208U * 1024U;
-constexpr uint32_t CHUNK_FWD_O_UB_APRIME_FP32_BYTES = 16U * 1024U;
+constexpr uint32_t CHUNK_FWD_O_UB_H_BASE =
+    CHUNK_FWD_O_UB_LAYOUT_OL_BASE + 2U * CHUNK_FWD_O_UB_LAYOUT_OL_SLOT_BYTES;
+constexpr uint32_t CHUNK_FWD_O_UB_H_ROW_ELEMS = CHUNK_FWD_O_A5_V + 16U;
+constexpr uint32_t CHUNK_FWD_O_UB_H_BYTES =
+    CHUNK_FWD_O_A5_K * CHUNK_FWD_O_UB_H_ROW_ELEMS * sizeof(uint16_t);
 constexpr uint32_t CHUNK_FWD_O_UB_APRIME_BF16_OFFSET =
-    CHUNK_FWD_O_UB_APRIME_FP32_OFFSET + CHUNK_FWD_O_UB_APRIME_FP32_BYTES;
+    CHUNK_FWD_O_UB_H_BASE + CHUNK_FWD_O_UB_H_BYTES;
 constexpr uint32_t CHUNK_FWD_O_STREAM_BANK_COUNT = 2U;
 constexpr uint32_t CHUNK_FWD_O_L1_RESIDENT_HEAD_COUNT = 4U;
 constexpr uint32_t CHUNK_FWD_O_UB_APRIME_BF16_SLOT_BYTES = CHUNK_FWD_O_APRIME_SLOT_BYTES;
@@ -44,6 +47,9 @@ static_assert(CHUNK_FWD_O_UB_APRIME_BF16_OFFSET +
                   CHUNK_FWD_O_UB_APRIME_BF16_SLOT_COUNT * CHUNK_FWD_O_UB_APRIME_BF16_SLOT_BYTES <=
               CHUNK_FWD_O_UB_TOTAL_BYTES,
               "Stage3 A-prime ping/pong exceeds UB capacity.");
+static_assert(CHUNK_FWD_O_UB_H_BASE + CHUNK_FWD_O_UB_H_BYTES <=
+                  CHUNK_FWD_O_UB_APRIME_BF16_OFFSET,
+              "Stage1 H scratch overlaps live Stage3 storage.");
 
 __aicore__ inline uint32_t ChunkFwdOGateOOffset(uint32_t slot)
 {
@@ -84,6 +90,11 @@ __aicore__ inline uint32_t ChunkFwdOAPrimeBf16Offset(uint32_t streamSlot)
 __aicore__ inline uint32_t ChunkFwdOOlOffset(uint32_t slot)
 {
     return CHUNK_FWD_O_UB_LAYOUT_OL_BASE + slot * CHUNK_FWD_O_UB_LAYOUT_OL_SLOT_BYTES;
+}
+
+__aicore__ inline uint32_t ChunkFwdOHUbOffset()
+{
+    return CHUNK_FWD_O_UB_H_BASE;
 }
 
 __aicore__ inline uint32_t ChunkFwdOHeadGroupNum(const ChunkFwdOTilingData &tiling)

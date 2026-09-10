@@ -260,8 +260,13 @@ public:
         tiling_ = tiling;
         pipe_ = pipe;
         oGm_.SetGlobalBuffer((__gm__ bfloat16_t *)o_);
+        hGm_.SetGlobalBuffer((__gm__ bfloat16_t *)h_);
+        hGm_.SetL2CacheHint(CacheMode::CACHE_MODE_DISABLE);
 
         pipe_->InitBuffer(ubBuf_, CHUNK_FWD_O_UB_TOTAL_BYTES);
+        hMte2ToMte3_ = pipe_->AllocEventID<HardEvent::MTE2_MTE3>();
+        hMte3ToMte2_ = pipe_->AllocEventID<HardEvent::MTE3_MTE2>();
+        SetFlag<HardEvent::MTE3_MTE2>(hMte3ToMte2_);
         for (uint32_t bankIdx = 0; bankIdx < BANK_COUNT_2; ++bankIdx) {
             mte2ToV_[bankIdx] = pipe_->AllocEventID<HardEvent::MTE2_V>();
             vToMte3Stream_[bankIdx] = pipe_->AllocEventID<HardEvent::V_MTE3>();
@@ -297,6 +302,46 @@ public:
             streamSlot_ = 0U;
             for (int64_t headOffset = 0; headOffset < taskCount; ++headOffset) {
                 const uint32_t ownerSubBlock = static_cast<uint32_t>(headOffset % 2);
+                if (tiling_.stateVFirst != 0) {
+                    if (ownerSubBlock == subBlockIdx) {
+                        // The owner AIV moves the complete H for this HEAD and
+                        // converts it into zN while MTE3 writes L1.
+                        constexpr uint32_t hUbElems =
+                            CHUNK_FWD_O_A5_K * CHUNK_FWD_O_UB_H_ROW_ELEMS;
+                        constexpr uint32_t hC0Elems = 16U;
+                        constexpr uint32_t hKBlockCount = CHUNK_FWD_O_A5_K / hC0Elems;
+                        const int64_t hv = hvBase + headOffset;
+                        const int64_t hOffset = ChunkFwdOHOffset(tiling_, loc, hv);
+                        LocalTensor<bfloat16_t> hLocal =
+                            ubBuf_.GetWithOffset<bfloat16_t>(hUbElems, ChunkFwdOHUbOffset());
+                        WaitFlag<HardEvent::MTE3_MTE2>(hMte3ToMte2_);
+                        DataCopyPad(hLocal, hGm_[hOffset],
+                                    {CHUNK_FWD_O_A5_K,
+                                     CHUNK_FWD_O_A5_V * sizeof(bfloat16_t),
+                                     0,
+                                     16U * sizeof(bfloat16_t),
+                                     0},
+                                    {false, 0, 0, 0});
+                        SetFlag<HardEvent::MTE2_MTE3>(hMte2ToMte3_);
+                        WaitFlag<HardEvent::MTE2_MTE3>(hMte2ToMte3_);
+
+                        LocalTensor<bfloat16_t> l1H =
+                            resource_.l1Buf.template GetBufferByByte<bfloat16_t>(
+                                ChunkFwdOL1HOffset(static_cast<uint32_t>(headOffset)));
+                        DataCopyParams hL1CopyParams;
+                        hL1CopyParams.blockCount = CHUNK_FWD_O_A5_V;
+                        hL1CopyParams.blockLen = 1U;
+                        hL1CopyParams.srcGap = CHUNK_FWD_O_UB_H_ROW_ELEMS / hC0Elems - 1U;
+                        hL1CopyParams.dstGap = 0U;
+                        for (uint32_t kBlock = 0; kBlock < hKBlockCount; ++kBlock) {
+                            const uint32_t dstOffset = kBlock * CHUNK_FWD_O_A5_V * hC0Elems;
+                            const uint32_t srcOffset = kBlock * hC0Elems;
+                            DataCopy(l1H[dstOffset], hLocal[srcOffset], hL1CopyParams);
+                        }
+                        SetFlag<HardEvent::MTE3_MTE2>(hMte3ToMte2_);
+                    }
+                    Catlass::Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecToCubeFlag_);
+                }
                 if (ownerSubBlock != subBlockIdx) {
                     continue;
                 }
@@ -414,6 +459,7 @@ public:
         for (uint32_t streamSlot = 0; streamSlot < BANK_COUNT_2; ++streamSlot) {
             WaitFlag<HardEvent::MTE3_V>(mte3ToVStream_[streamSlot]);
         }
+        WaitFlag<HardEvent::MTE3_MTE2>(hMte3ToMte2_);
     }
 
     __aicore__ inline void LoadStage1G(const ChunkFwdOChunkLoc &loc, int64_t hv, uint32_t streamSlot)
@@ -487,11 +533,14 @@ private:
     TBuf<TPosition::VECCALC> ubBuf_;
     Catlass::Arch::Resource<ArchTag> resource_;
     GlobalTensor<bfloat16_t> oGm_;
+    GlobalTensor<bfloat16_t> hGm_;
     uint32_t streamSlot_ = 0;
     TEventID mte2ToV_[BANK_COUNT_2];
     TEventID vToMte3Stream_[BANK_COUNT_2];
     TEventID mte3ToVStream_[BANK_COUNT_2];
     TEventID vToMte3Event_[BANK_COUNT_2];
+    TEventID hMte2ToMte3_;
+    TEventID hMte3ToMte2_;
     Catlass::Arch::CrossCoreFlag vecToCubeFlag_{CHUNK_FWD_O_VEC_TO_CUBE_READY_FLAG};
     Catlass::Arch::CrossCoreFlag cubeToVecFlag_{CHUNK_FWD_O_CUBE_TO_VEC_READY_FLAG};
 };

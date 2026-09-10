@@ -317,6 +317,8 @@ private:
         const uint32_t mActual = static_cast<uint32_t>(loc.chunkLen);
         const TEventID qkEvent = L1Event(qkL1Slot);
         const TEventID hEvent = L1Event(kL1ResidentHeadCount + hL1Slot);
+        LocalTensor<Element> l1H =
+            resource_.l1Buf.template GetBufferByByte<Element>(ChunkFwdOL1HOffset(hL1Slot));
 
         // Load Q and K once for all GVA HEADs that share the same HK in this group.
         if (loadQK) {
@@ -346,20 +348,20 @@ private:
             SetFlag<HardEvent::MTE2_MTE1>(qkEvent);
         }
 
-        // Queue H behind Q/K so MTE2 stays active while MTE1 starts consuming Q/K.
-        WaitFlag<HardEvent::MTE1_MTE2>(hEvent);
-        const int64_t hOffset = ChunkFwdOHOffset(tiling_, loc, hv);
-        using LayoutTagL1H = typename TileCopyQH::LayoutTagL1B;
-        auto layoutHGm = tla::MakeLayout<Element, HLayout>(kK, kV);
-        auto tensorHGm = tla::MakeTensor(hGm_[hOffset], layoutHGm, Catlass::Arch::PositionGM{});
-        auto blockH = GetTile(tensorHGm, tla::MakeCoord(0, 0), tla::MakeShape(kK, kV));
-        using CopyGmToL1H = typename TileCopyQH::template CopyGmToL1B<decltype(blockH)>;
-        LocalTensor<Element> l1H =
-            resource_.l1Buf.template GetBufferByByte<Element>(ChunkFwdOL1HOffset(hL1Slot));
-        auto layoutL1H = tla::MakeLayout<Element, LayoutTagL1H>(kK, kV);
-        auto tensorL1H = tla::MakeTensor(l1H, layoutL1H, Catlass::Arch::PositionL1{});
-        CopyGmToL1H{}(tensorL1H, blockH);
-        SetFlag<HardEvent::MTE2_MTE1>(hEvent);
+        if constexpr (!StateVFirst) {
+            // Queue H behind Q/K so MTE2 stays active while MTE1 starts consuming Q/K.
+            WaitFlag<HardEvent::MTE1_MTE2>(hEvent);
+            const int64_t hOffset = ChunkFwdOHOffset(tiling_, loc, hv);
+            using LayoutTagL1H = typename TileCopyQH::LayoutTagL1B;
+            auto layoutHGm = tla::MakeLayout<Element, HLayout>(kK, kV);
+            auto tensorHGm = tla::MakeTensor(hGm_[hOffset], layoutHGm, Catlass::Arch::PositionGM{});
+            auto blockH = GetTile(tensorHGm, tla::MakeCoord(0, 0), tla::MakeShape(kK, kV));
+            using CopyGmToL1H = typename TileCopyQH::template CopyGmToL1B<decltype(blockH)>;
+            auto layoutL1H = tla::MakeLayout<Element, LayoutTagL1H>(kK, kV);
+            auto tensorL1H = tla::MakeTensor(l1H, layoutL1H, Catlass::Arch::PositionL1{});
+            CopyGmToL1H{}(tensorL1H, blockH);
+            SetFlag<HardEvent::MTE2_MTE1>(hEvent);
+        }
 
         // Let the next task's independent Q/K/H transfers overlap the previous
         // task's Stage 5. Consume the ordered group token before touching L0/UB.
@@ -435,7 +437,11 @@ private:
         WaitFlag<HardEvent::M_FIX>(qktCSlot);
         copyQktToUb(tensorARawUb, qktTile, static_cast<uint8_t>(ownerSubBlock), 0);
         SetFlag<HardEvent::FIX_M>(qktCSlot);
-        WaitFlag<HardEvent::MTE2_MTE1>(hEvent);
+        if constexpr (!StateVFirst) {
+            WaitFlag<HardEvent::MTE2_MTE1>(hEvent);
+        } else {
+            Catlass::Arch::CrossCoreWaitFlag(vecToCubeFlag_);
+        }
 
         // Move Q/H from L1 to L0 and compute Q @ H.
         const uint32_t qhASlot = l0ASlot_;
@@ -479,7 +485,9 @@ private:
         CopyQhL1ToL0B{}(tileQhL0B, tileQhL1H);
         SetFlag<HardEvent::MTE1_M>(qhCSlot);
         WaitFlag<HardEvent::MTE1_M>(qhCSlot);
-        SetFlag<HardEvent::MTE1_MTE2>(hEvent);
+        if constexpr (!StateVFirst) {
+            SetFlag<HardEvent::MTE1_MTE2>(hEvent);
+        }
         QhTileMmad{}(tileQhL0C, tileQhL0A, tileQhL0B, m, kV, kK, true, 0);
 
         PipeBarrier<PIPE_M>();
