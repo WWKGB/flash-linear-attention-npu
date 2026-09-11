@@ -180,6 +180,7 @@ _GET_WORKSPACE_ARGTYPES = {
         ctypes.c_double,  # scale
         ctypes.c_int64,  # chunkSize
         ctypes.c_bool,  # useExp2
+        ctypes.c_bool,  # stateVFirst
         ctypes.c_void_p,  # dhOut
         ctypes.c_void_p,  # dh0Out
         ctypes.c_void_p,  # dv2Out
@@ -543,7 +544,7 @@ def npu_chunk_gated_delta_rule_bwd_dhu(
     cu_seqlens=None,
     chunk_indices=None,
     use_exp2=False,
-    transpose_state_layout=False,
+    state_v_first=False,
 ):
     import torch
 
@@ -565,8 +566,10 @@ def npu_chunk_gated_delta_rule_bwd_dhu(
     if gK is not None and _shape(gK) != (B, Hv, T, K):
         raise ValueError(f"gK must have shape {(B, Hv, T, K)}, got {_shape(gK)}.")
     NT = _chunk_num(T, int(chunk_size), chunk_indices)
+    N = len(cu_seqlens) - 1 if cu_seqlens is not None else B
     dh = _empty((B, Hv, NT, K, V), q)
-    dh0 = _empty((B, Hv, NT, K, V), q) if h0 is not None else None
+    dh0_shape = (N, Hv, V, K) if _optional_bool(state_v_first, False) else (N, Hv, K, V)
+    dh0 = _empty(dh0_shape, q) if h0 is not None else None
     dv2 = _empty_like(dv)
     outputs = (dh, dh0, dv2)
 
@@ -592,6 +595,7 @@ def npu_chunk_gated_delta_rule_bwd_dhu(
             ctypes.c_double(float(scale)),
             ctypes.c_int64(int(chunk_size)),
             ctypes.c_bool(_optional_bool(use_exp2, gK is not None)),
+            ctypes.c_bool(_optional_bool(state_v_first, False)),
             logical_tensor(ctx, dh, "dh"),
             logical_tensor(ctx, dh0, "dh0"),
             logical_tensor(ctx, dv2, "dv2"),

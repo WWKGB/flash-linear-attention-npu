@@ -12,7 +12,6 @@
 #include "aclnn_kernels/common/op_error_check.h"
 #include "aclnn_kernels/contiguous.h"
 #include "aclnn_kernels/reshape.h"
-#include "aclnn_kernels/slice.h"
 #include "aclnn_kernels/transpose.h"
 #include "opdev/common_types.h"
 #include "opdev/make_op_executor.h"
@@ -183,61 +182,6 @@ aclnnStatus ViewCopy(const aclTensor *src, const aclTensor *dst, aclOpExecutor *
 
 int64_t ChunkCount(const Params &params, int64_t tokens);
 int64_t SequenceCount(const Params &params, int64_t batch);
-
-aclnnStatus CopyDh0(const aclTensor *dh0Chunked, const Params &params,
-                    const ShapeInfo &info, aclOpExecutor *executor)
-{
-    const int64_t sequences = SequenceCount(params, info.batch);
-    const int64_t totalChunks = ChunkCount(params, info.tokens);
-    const int64_t sequenceElements = info.hv * info.keyDim * info.valueDim;
-    int64_t firstChunk = 0;
-    for (int64_t sequence = 0; sequence < sequences; ++sequence) {
-        if (params.chunkIndices != nullptr) {
-            while (firstChunk < totalChunks &&
-                   ((*params.chunkIndices)[firstChunk * 2] != sequence ||
-                    (*params.chunkIndices)[firstChunk * 2 + 1] != 0)) {
-                ++firstChunk;
-            }
-            CHECK_COND(firstChunk < totalChunks, ACLNN_ERR_PARAM_INVALID,
-                       "each sequence must have a first chunk for dh0.");
-        }
-        const int64_t sourceBatch = params.chunkIndices == nullptr ? sequence : 0;
-        const int64_t sourceChunk = params.chunkIndices == nullptr ? 0 : firstChunk;
-        const aclIntArray *sourceOffsets = MakePerm(
-            {sourceBatch, 0, sourceChunk, 0, 0}, executor);
-        const aclIntArray *sourceSize = MakePerm(
-            {1, info.hv, 1, info.keyDim, info.valueDim}, executor);
-        const aclTensor *source = l0op::Slice(
-            dh0Chunked, sourceOffsets, sourceSize, executor);
-        CHECK_COND(source != nullptr, ACLNN_ERR_INNER_NULLPTR,
-                   "slicing chunked dh0 failed.");
-        source = l0op::Reshape(
-            source, MakeShape({1, info.hv, info.keyDim, info.valueDim}), executor);
-        CHECK_COND(source != nullptr, ACLNN_ERR_INNER_NULLPTR,
-                   "reshaping chunked dh0 failed.");
-        if (params.stateVFirst) {
-            source = TransposeContiguous(source, {0, 1, 3, 2}, executor);
-            CHECK_COND(source != nullptr, ACLNN_ERR_INNER_NULLPTR,
-                       "transposing dh0 failed.");
-        }
-
-        const op::Shape destinationShape = params.stateVFirst
-                                               ? MakeShape({1, info.hv, info.valueDim, info.keyDim})
-                                               : MakeShape({1, info.hv, info.keyDim, info.valueDim});
-        const aclTensor *destination = executor->CreateView(
-            params.dh0Out, destinationShape, params.dh0Out->GetStorageShape(),
-            params.dh0Out->GetViewStrides(),
-            params.dh0Out->GetViewOffset() + sequence * sequenceElements);
-        CHECK_COND(destination != nullptr, ACLNN_ERR_INNER_NULLPTR,
-                   "creating public dh0 view failed.");
-        CHECK_RET(ViewCopy(source, destination, executor) == ACLNN_SUCCESS,
-                  ACLNN_ERR_INNER_NULLPTR);
-        if (params.chunkIndices != nullptr) {
-            ++firstChunk;
-        }
-    }
-    return ACLNN_SUCCESS;
-}
 
 int64_t ChunkCount(const Params &params, int64_t tokens)
 {
@@ -529,7 +473,6 @@ extern "C" aclnnStatus aclnnChunkGatedDeltaRuleBwdGetWorkspaceSize(
     const aclTensor *kRstdHead = params.kRstd;
     const aclTensor *betaRawHead = params.betaRaw;
     const aclTensor *initialStateKv = params.initialState;
-    const aclTensor *dhtKv = params.dht;
     if (info.sequenceMajor) {
         qHead = TransposeContiguous(params.q, {0, 2, 1, 3}, executorPtr);
         kHead = TransposeContiguous(params.k, {0, 2, 1, 3}, executorPtr);
@@ -549,9 +492,7 @@ extern "C" aclnnStatus aclnnChunkGatedDeltaRuleBwdGetWorkspaceSize(
     }
     if (params.stateVFirst) {
         initialStateKv = TransposeContiguous(params.initialState, {0, 1, 3, 2}, executorPtr);
-        dhtKv = TransposeContiguous(params.dht, {0, 1, 3, 2}, executorPtr);
-        CHECK_COND((params.initialState == nullptr || initialStateKv != nullptr) &&
-                       (params.dht == nullptr || dhtKv != nullptr),
+        CHECK_COND(params.initialState == nullptr || initialStateKv != nullptr,
                    ACLNN_ERR_INNER_NULLPTR, "state layout conversion failed.");
     }
 
@@ -571,9 +512,6 @@ extern "C" aclnnStatus aclnnChunkGatedDeltaRuleBwdGetWorkspaceSize(
     const aclTensor *vNew = executorPtr->AllocTensor(vShape, dtype, Format::FORMAT_ND);
     const aclTensor *dh = executorPtr->AllocTensor(hShape, dtype, Format::FORMAT_ND);
     const aclTensor *dv2 = executorPtr->AllocTensor(vShape, dtype, Format::FORMAT_ND);
-    const aclTensor *dh0Chunked = params.dh0Out != nullptr
-                                      ? executorPtr->AllocTensor(hShape, dtype, Format::FORMAT_ND)
-                                      : nullptr;
 
     const aclTensor *dqHead = info.sequenceMajor
                                   ? executorPtr->AllocTensor(qShape, dtype, Format::FORMAT_ND)
@@ -592,8 +530,7 @@ extern "C" aclnnStatus aclnnChunkGatedDeltaRuleBwdGetWorkspaceSize(
                                   : params.dGOut;
     CHECK_COND(w != nullptr && u != nullptr && dvLocal != nullptr && h != nullptr &&
                    vNew != nullptr && dh != nullptr && dv2 != nullptr && dqHead != nullptr &&
-                   dkHead != nullptr && dvHead != nullptr && dBetaHead != nullptr && dGHead != nullptr &&
-                   (params.dh0Out == nullptr || dh0Chunked != nullptr),
+                   dkHead != nullptr && dvHead != nullptr && dBetaHead != nullptr && dGHead != nullptr,
                ACLNN_ERR_INNER_NULLPTR, "allocating composite intermediate tensors failed.");
 
     const auto intraResult = l0op::ChunkGdnBwdIntra(
@@ -613,17 +550,12 @@ extern "C" aclnnStatus aclnnChunkGatedDeltaRuleBwdGetWorkspaceSize(
 
     const auto dhuResult = l0op::ChunkGatedDeltaRuleBwdDhu(
         qHead, kHead, w, dOHead, dvLocal, gHead, nullptr,
-        initialStateKv, dhtKv, params.cuSeqlens, params.chunkIndices,
-        params.scale, params.chunkSize, params.useExp2, dh, dh0Chunked,
+        params.initialState, params.dht, params.cuSeqlens, params.chunkIndices,
+        params.scale, params.chunkSize, params.useExp2, params.stateVFirst, dh, params.dh0Out,
         dv2, executorPtr);
     CHECK_COND(dhuResult[0] != nullptr && dhuResult[1] != nullptr &&
                    dhuResult[2] != nullptr,
                ACLNN_ERR_INNER_NULLPTR, "ChunkGatedDeltaRuleBwdDhu composition failed.");
-
-    if (params.dh0Out != nullptr) {
-        CHECK_RET(CopyDh0(dh0Chunked, params, info, executorPtr) == ACLNN_SUCCESS,
-                  ACLNN_ERR_INNER_NULLPTR);
-    }
 
     const auto finalizeResult = l0op::ChunkGatedDeltaRuleBwdFinalize(
         qHead, kHead, vHead, vNew, dOHead, dv2, gHead, betaHead, h, dh,

@@ -160,6 +160,7 @@ class AclnnCtypesAbiTest(unittest.TestCase):
             ctypes.c_double,
             ctypes.c_int64,
             ctypes.c_bool,
+            ctypes.c_bool,
             *([ctypes.c_void_p] * 3),
             ctypes.POINTER(ctypes.c_uint64),
             ctypes.POINTER(ctypes.c_void_p),
@@ -205,6 +206,7 @@ class AclnnCtypesAbiTest(unittest.TestCase):
         self.assertEqual(len(captured["args"]), len(operator_argtypes))
         self.assertEqual([type(arg) for arg in captured["args"]], operator_argtypes)
         self.assertFalse(captured["args"][13].value)
+        self.assertFalse(captured["args"][14].value)
 
     def test_recurrent_gated_delta_rule_requires_at_least_one_gate_before_launch(self):
         with mock.patch.object(ACLNN_CTYPES, "_call_aclnn") as call_aclnn:

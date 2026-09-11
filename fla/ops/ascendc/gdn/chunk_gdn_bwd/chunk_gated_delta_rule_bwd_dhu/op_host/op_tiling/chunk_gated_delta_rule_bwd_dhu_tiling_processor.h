@@ -81,6 +81,7 @@ struct ChunkGatedDeltaRuleBwdDhuTilingContext {
     bool hasG;
     bool hasGk;
     bool useExp2;
+    bool stateVFirst;
     bool hasDh0;
     bool stage0Debug;
     double scale;
@@ -392,6 +393,7 @@ private:
             return ge::GRAPH_FAILED;
         }
         tiling_.useExp2 = ctx_.useExp2 ? 1 : 0;
+        tiling_.stateVFirst = ctx_.stateVFirst ? 1 : 0;
 
         if (tiling_.K != K_SIZE_128) {
             return ge::GRAPH_FAILED;
@@ -462,9 +464,8 @@ private:
         tiling_.dh0ClearTailElems = 0;
         if (ctx_.hasDh0) {
             const uint64_t dh0Elems =
-                static_cast<uint64_t>(tiling_.B) * static_cast<uint64_t>(tiling_.HV) *
-                static_cast<uint64_t>(tiling_.totalChunkNum) * static_cast<uint64_t>(tiling_.K) *
-                static_cast<uint64_t>(tiling_.V);
+                static_cast<uint64_t>(tiling_.seqNum) * static_cast<uint64_t>(tiling_.HV) *
+                static_cast<uint64_t>(tiling_.K) * static_cast<uint64_t>(tiling_.V);
             const uint64_t dh0Bytes = dh0Elems * qSize;
             if (dh0Bytes > 0) {
                 const uint64_t maxVecCoreNum =
