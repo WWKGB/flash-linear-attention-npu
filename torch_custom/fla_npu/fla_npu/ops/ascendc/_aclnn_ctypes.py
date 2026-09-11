@@ -186,6 +186,22 @@ _GET_WORKSPACE_ARGTYPES = {
         ctypes.POINTER(ctypes.c_uint64),  # workspaceSize
         ctypes.POINTER(ctypes.c_void_p),  # executor
     ],
+    "aclnnChunkGatedDeltaRuleBwd": [
+        *([ctypes.c_void_p] * 14),  # tensors through dtBiasOptional
+        ctypes.c_void_p,  # cuSeqlensOptional
+        ctypes.c_void_p,  # chunkIndicesOptional
+        ctypes.c_char_p,  # layout
+        ctypes.c_double,  # scale
+        ctypes.c_int64,  # chunkSize
+        ctypes.c_bool,  # useExp2
+        ctypes.c_bool,  # useGateInKernel
+        ctypes.c_bool,  # useQkL2normInKernel
+        ctypes.c_bool,  # useBetaSigmoidInKernel
+        ctypes.c_bool,  # stateVFirst
+        *([ctypes.c_void_p] * 8),  # dq, dk, dv, dbeta, dg, dh0, dALog, dDtBias
+        ctypes.POINTER(ctypes.c_uint64),  # workspaceSize
+        ctypes.POINTER(ctypes.c_void_p),  # executor
+    ],
     "aclnnChunkGdnBwdIntra": [
         ctypes.c_void_p,  # q
         ctypes.c_void_p,  # k
@@ -579,6 +595,175 @@ def npu_chunk_gated_delta_rule_bwd_dhu(
             logical_tensor(ctx, dh, "dh"),
             logical_tensor(ctx, dh0, "dh0"),
             logical_tensor(ctx, dv2, "dv2"),
+        ],
+        outputs,
+    )
+
+
+def npu_chunk_gated_delta_rule_bwd(
+    q,
+    k,
+    v,
+    g,
+    beta,
+    A,
+    d_o,
+    scale,
+    chunk_size,
+    *,
+    layout="BSND",
+    initial_state=None,
+    dht=None,
+    q_rstd=None,
+    k_rstd=None,
+    beta_raw=None,
+    a_log=None,
+    dt_bias=None,
+    use_exp2=True,
+    use_gate_in_kernel=False,
+    use_qk_l2norm_in_kernel=False,
+    use_beta_sigmoid_in_kernel=False,
+    state_v_first=False,
+    cu_seqlens=None,
+    chunk_indices=None,
+    return_intermediate_states=False,
+):
+    """Run the composite chunk gated delta rule backward graph."""
+    import torch
+
+    q_shape = _shape(q)
+    k_shape = _shape(k)
+    v_shape = _shape(v)
+    g_shape = _shape(g)
+    layout = str(layout)
+    if layout not in ("BNSD", "BSND", "NTD", "TND"):
+        raise ValueError("layout must be BNSD, BSND, NTD or TND.")
+    if len(q_shape) != 4 or len(k_shape) != 4 or len(v_shape) != 4:
+        raise ValueError("q, k and v must be rank-4 tensors.")
+    if q_shape != k_shape:
+        raise ValueError("q and k must have identical shapes.")
+    sequence_major = layout in ("BSND", "TND")
+    if sequence_major:
+        batch, tokens, key_heads, key_dim = q_shape
+        value_batch, value_tokens, value_heads, value_dim = v_shape
+        expected_gate_shape = (batch, tokens, value_heads)
+    else:
+        batch, key_heads, tokens, key_dim = q_shape
+        value_batch, value_heads, value_tokens, value_dim = v_shape
+        expected_gate_shape = (batch, value_heads, tokens)
+    if value_batch != batch or value_tokens != tokens:
+        raise ValueError("q/k and v must share B and T.")
+    if key_dim != 128 or value_dim != 128 or int(chunk_size) != 64:
+        raise ValueError("the composite currently requires K=V=128 and chunk_size=64.")
+    if value_heads % key_heads != 0 or value_heads // key_heads not in (1, 2, 3, 4):
+        raise ValueError("HV/HK must be an integer in [1, 4].")
+    if g_shape != expected_gate_shape or _shape(beta) != expected_gate_shape:
+        raise ValueError(f"g and beta must have shape {expected_gate_shape}.")
+    if _shape(d_o) != v_shape:
+        raise ValueError("d_o must have the same shape as v.")
+    if _shape(A) != (batch, value_heads, tokens, int(chunk_size)):
+        raise ValueError("A must have BNSD shape [B, HV, T, chunk_size].")
+    if (cu_seqlens is None) != (chunk_indices is None):
+        raise ValueError("cu_seqlens and chunk_indices must be provided together.")
+    if cu_seqlens is not None and batch != 1:
+        raise ValueError("varlen rank-4 input requires B=1.")
+
+    use_exp2 = _optional_bool(use_exp2, True)
+    use_gate_in_kernel = _optional_bool(use_gate_in_kernel, False)
+    use_qk_l2norm_in_kernel = _optional_bool(use_qk_l2norm_in_kernel, False)
+    use_beta_sigmoid_in_kernel = _optional_bool(use_beta_sigmoid_in_kernel, False)
+    state_v_first = _optional_bool(state_v_first, False)
+    # Reserved for ABI compatibility; intermediate tensors remain executor-private.
+    _optional_bool(return_intermediate_states, False)
+    if not use_exp2:
+        raise ValueError("use_exp2=False is not supported.")
+    if use_gate_in_kernel:
+        raise ValueError("use_gate_in_kernel=True is not supported.")
+    if use_qk_l2norm_in_kernel != (q_rstd is not None and k_rstd is not None):
+        raise ValueError("q_rstd and k_rstd must be provided exactly when Q/K L2Norm backward is enabled.")
+    if use_beta_sigmoid_in_kernel != (beta_raw is not None):
+        raise ValueError("beta_raw must be provided exactly when beta sigmoid backward is enabled.")
+    expected_norm_shape = (
+        (batch, tokens, key_heads) if sequence_major else (batch, key_heads, tokens)
+    )
+    if q_rstd is not None:
+        if _shape(q_rstd) != expected_norm_shape or _shape(k_rstd) != expected_norm_shape:
+            raise ValueError(f"q_rstd and k_rstd must have shape {expected_norm_shape}.")
+        if q_rstd.dtype != torch.float32 or k_rstd.dtype != torch.float32:
+            raise ValueError("q_rstd and k_rstd must use float32.")
+    if beta_raw is not None:
+        if _shape(beta_raw) != expected_gate_shape:
+            raise ValueError(f"beta_raw must have shape {expected_gate_shape}.")
+        if beta_raw.dtype != beta.dtype:
+            raise ValueError("beta_raw must use the same bfloat16 or float32 dtype as beta.")
+    sequences = batch if cu_seqlens is None else len(tuple(cu_seqlens)) - 1
+    state_shape = (sequences, value_heads, value_dim, key_dim) if state_v_first else (
+        sequences, value_heads, key_dim, value_dim
+    )
+    if initial_state is not None:
+        if _shape(initial_state) != state_shape:
+            raise ValueError(f"initial_state must have shape {state_shape}.")
+        if initial_state.dtype != q.dtype:
+            raise ValueError("initial_state must use the main bfloat16 dtype.")
+    if dht is not None:
+        if _shape(dht) != state_shape:
+            raise ValueError(f"dht must have shape {state_shape}.")
+        if dht.dtype != q.dtype:
+            raise ValueError("dht must use the main bfloat16 dtype.")
+
+    dq = _empty_like(q)
+    dk = _empty_like(k)
+    dv = _empty_like(v)
+    d_beta = _empty_like(beta)
+    d_g = _empty_like(g)
+    dh0 = _empty_like(initial_state) if initial_state is not None else None
+    d_a_log = None
+    d_dt_bias = None
+    outputs = (dq, dk, dv, d_beta, d_g, dh0, d_a_log, d_dt_bias)
+    layout_buffer = ctypes.create_string_buffer(layout.encode("utf-8"))
+
+    def logical_tensor(ctx, tensor, name):
+        return ctx.tensor(
+            tensor,
+            name,
+            storage_shape_override=_shape(tensor) if tensor is not None else None,
+        )
+
+    return _call_aclnn(
+        "aclnnChunkGatedDeltaRuleBwd",
+        lambda ctx: [
+            logical_tensor(ctx, q, "q"),
+            logical_tensor(ctx, k, "k"),
+            logical_tensor(ctx, v, "v"),
+            logical_tensor(ctx, g, "g"),
+            logical_tensor(ctx, beta, "beta"),
+            logical_tensor(ctx, A, "A"),
+            logical_tensor(ctx, d_o, "d_o"),
+            logical_tensor(ctx, initial_state, "initial_state"),
+            logical_tensor(ctx, dht, "dht"),
+            logical_tensor(ctx, q_rstd, "q_rstd"),
+            logical_tensor(ctx, k_rstd, "k_rstd"),
+            logical_tensor(ctx, beta_raw, "beta_raw"),
+            logical_tensor(ctx, a_log, "a_log"),
+            logical_tensor(ctx, dt_bias, "dt_bias"),
+            ctx.int_array(cu_seqlens),
+            ctx.int_array(chunk_indices),
+            ctypes.cast(layout_buffer, ctypes.c_char_p),
+            ctypes.c_double(float(scale)),
+            ctypes.c_int64(int(chunk_size)),
+            ctypes.c_bool(use_exp2),
+            ctypes.c_bool(use_gate_in_kernel),
+            ctypes.c_bool(use_qk_l2norm_in_kernel),
+            ctypes.c_bool(use_beta_sigmoid_in_kernel),
+            ctypes.c_bool(state_v_first),
+            logical_tensor(ctx, dq, "dq"),
+            logical_tensor(ctx, dk, "dk"),
+            logical_tensor(ctx, dv, "dv"),
+            logical_tensor(ctx, d_beta, "d_beta"),
+            logical_tensor(ctx, d_g, "d_g"),
+            logical_tensor(ctx, dh0, "dh0"),
+            logical_tensor(ctx, d_a_log, "d_a_log"),
+            logical_tensor(ctx, d_dt_bias, "d_dt_bias"),
         ],
         outputs,
     )
