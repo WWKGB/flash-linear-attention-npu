@@ -80,7 +80,7 @@ aclnnStatus aclnnChunkGatedDeltaRuleBwdDhu(
 
 | 参数名 | 输入/输出 | 描述 | 数据类型 | 数据格式 | 维度（Shape） | 非连续 Tensor |
 |---|---|---|---|---|---|---|
-| `dhOut` | 输出 | 各 chunk 起始时刻的隐藏状态梯度 | `FLOAT16`、`BFLOAT16` | `ND` | `[B, HV, NT, K, V]` | 支持 |
+| `dhOut` | 输出 | 各 chunk 起始时刻的隐藏状态梯度 | `FLOAT16`、`BFLOAT16` | `ND` | `[B,HV,NT,K,V]` | 支持 |
 | `dh0Out` | 输出 | 初始隐藏状态 `h0` 的梯度（仅当 `h0Optional` 非空时有意义）| `FLOAT16`、`BFLOAT16` | `ND` | `[N,HV,K,V]` 或 `[N,HV,V,K]` | 支持 |
 | `dv2Out` | 输出 | 融合了隐藏状态贡献后的 Value 梯度 | `FLOAT16`、`BFLOAT16` | `ND` | `[B, HV, T, V]` | 支持 |
 | `workspaceSize` | 输出 | Device 侧所需 workspace 大小 | `uint64_t` | - | 标量 | - |
@@ -97,7 +97,7 @@ aclnnStatus aclnnChunkGatedDeltaRuleBwdDhu(
 - `gOptional` 的形状必须为 `[B, HV, T]`（若提供）。
 - `gkOptional` 的形状必须为 `[B, HV, T, K]`（若提供）。
 - `h0Optional`、`dhtOptional` 和 `dh0Out` 的状态布局由 `stateVFirst` 指定；定长时 `N=B`，变长时 `N=cuSeqlens.size()-1`。
-- `dhOut` 的形状必须为 `[B, HV, NT, K, V]`。
+- `dhOut` 固定使用 `[B,HV,NT,K,V]`；`stateVFirst` 仅控制 `h0Optional`、`dhtOptional` 和 `dh0Out` 的状态布局。
 - **GVA 约束**：`HV % HK == 0`；读 `q`/`k` 时使用 `hq = hv / (HV / HK)`，读/写 `w`/`dO`/`dv`/`g`/`dh`/`dv2` 使用 value head 索引 `hv`。
 - 当前实现仅支持 `K = 128`；其他 `K` 尺寸会在 tiling 阶段被拒绝。
 - 当前实现仅支持 `V = 128` 或 `V = 256`；其他 `V` 尺寸会在 tiling 阶段被拒绝（Cube tile 原生按 `V` 上限 256 设计，**无**按 V 维切换的 TilingKey）。

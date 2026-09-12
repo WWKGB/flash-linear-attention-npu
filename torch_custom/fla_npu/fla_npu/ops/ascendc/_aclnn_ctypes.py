@@ -544,7 +544,7 @@ def npu_chunk_gated_delta_rule_bwd_dhu(
     cu_seqlens=None,
     chunk_indices=None,
     use_exp2=False,
-    state_v_first=False,
+    transpose_state_layout=False,
 ):
     import torch
 
@@ -567,8 +567,10 @@ def npu_chunk_gated_delta_rule_bwd_dhu(
         raise ValueError(f"gK must have shape {(B, Hv, T, K)}, got {_shape(gK)}.")
     NT = _chunk_num(T, int(chunk_size), chunk_indices)
     N = len(cu_seqlens) - 1 if cu_seqlens is not None else B
+    state_v_first = _optional_bool(transpose_state_layout, False)
+    state_tail = (V, K) if state_v_first else (K, V)
     dh = _empty((B, Hv, NT, K, V), q)
-    dh0_shape = (N, Hv, V, K) if _optional_bool(state_v_first, False) else (N, Hv, K, V)
+    dh0_shape = (N, Hv, *state_tail)
     dh0 = _empty(dh0_shape, q) if h0 is not None else None
     dv2 = _empty_like(dv)
     outputs = (dh, dh0, dv2)
@@ -718,8 +720,9 @@ def npu_chunk_gated_delta_rule_bwd(
     dq = _empty_like(q)
     dk = _empty_like(k)
     dv = _empty_like(v)
-    d_beta = _empty_like(beta)
-    d_g = _empty_like(g)
+    scalar_output_shape = (batch, tokens, value_heads)
+    d_beta = _empty(scalar_output_shape, beta)
+    d_g = _empty(scalar_output_shape, g)
     dh0 = _empty_like(initial_state) if initial_state is not None else None
     d_a_log = None
     d_dt_bias = None

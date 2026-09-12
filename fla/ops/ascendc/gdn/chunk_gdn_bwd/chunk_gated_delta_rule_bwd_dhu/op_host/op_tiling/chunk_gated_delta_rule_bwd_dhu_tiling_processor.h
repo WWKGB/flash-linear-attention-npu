@@ -223,7 +223,9 @@ private:
 
     uint64_t VectorTileBytes(uint64_t row, uint64_t maxDim, uint64_t qSize) const
     {
-        uint64_t bytes = 4 * Align32(row * maxDim * qSize) +
+        const uint64_t outputRows = std::max<uint64_t>(row, 16UL);
+        uint64_t bytes = 2 * Align32(row * maxDim * qSize) +
+                         2 * Align32(outputRows * maxDim * qSize) +
                          2 * Align32(row * maxDim * DTYPE_SIZE_FLOAT) +
                          2 * Align32(row * static_cast<uint64_t>(tiling_.V) * DTYPE_SIZE_FLOAT);
         if (ctx_.qDataType == ge::DT_BF16) {

@@ -314,9 +314,11 @@ aclnnStatus CheckParams(const Params &params, ShapeInfo &info)
                ACLNN_ERR_PARAM_INVALID,
                "q/k, v/d_o and g/beta must have matching shapes.");
     CHECK_COND(SameShape(params.q, params.dqOut) && SameShape(params.k, params.dkOut) &&
-                   SameShape(params.v, params.dvOut) && SameShape(params.beta, params.dBetaOut) &&
-                   SameShape(params.g, params.dGOut),
-               ACLNN_ERR_PARAM_INVALID, "gradient output shapes must match their inputs.");
+                   SameShape(params.v, params.dvOut),
+               ACLNN_ERR_PARAM_INVALID, "dq, dk and dv shapes must match their inputs.");
+    CHECK_COND(HasShape(params.dBetaOut, {info.batch, info.tokens, info.hv}) &&
+                   HasShape(params.dGOut, {info.batch, info.tokens, info.hv}),
+               ACLNN_ERR_PARAM_INVALID, "dBeta and dG must use BSND shape [B,T,HV].");
     CHECK_COND(HasShape(params.a, {info.batch, info.hv, info.tokens, params.chunkSize}),
                ACLNN_ERR_PARAM_INVALID, "A must use BNSD shape [B,HV,T,64].");
     CHECK_RET(CheckMetadata(params, info.tokens) == ACLNN_SUCCESS,
@@ -495,7 +497,6 @@ extern "C" aclnnStatus aclnnChunkGatedDeltaRuleBwdGetWorkspaceSize(
         CHECK_COND(params.initialState == nullptr || initialStateKv != nullptr,
                    ACLNN_ERR_INNER_NULLPTR, "state layout conversion failed.");
     }
-
     const int64_t chunks = ChunkCount(params, info.tokens);
     const DataType dtype = qHead->GetDataType();
     const DataType gateType = gHead->GetDataType();
@@ -522,12 +523,8 @@ extern "C" aclnnStatus aclnnChunkGatedDeltaRuleBwdGetWorkspaceSize(
     const aclTensor *dvHead = info.sequenceMajor
                                   ? executorPtr->AllocTensor(vShape, dtype, Format::FORMAT_ND)
                                   : params.dvOut;
-    const aclTensor *dBetaHead = info.sequenceMajor
-                                     ? executorPtr->AllocTensor(gateShape, gateType, Format::FORMAT_ND)
-                                     : params.dBetaOut;
-    const aclTensor *dGHead = info.sequenceMajor
-                                  ? executorPtr->AllocTensor(gateShape, gateType, Format::FORMAT_ND)
-                                  : params.dGOut;
+    const aclTensor *dBetaHead = executorPtr->AllocTensor(gateShape, gateType, Format::FORMAT_ND);
+    const aclTensor *dGHead = executorPtr->AllocTensor(gateShape, gateType, Format::FORMAT_ND);
     CHECK_COND(w != nullptr && u != nullptr && dvLocal != nullptr && h != nullptr &&
                    vNew != nullptr && dh != nullptr && dv2 != nullptr && dqHead != nullptr &&
                    dkHead != nullptr && dvHead != nullptr && dBetaHead != nullptr && dGHead != nullptr,
@@ -573,19 +570,19 @@ extern "C" aclnnStatus aclnnChunkGatedDeltaRuleBwdGetWorkspaceSize(
         const aclTensor *dqSequence = TransposeContiguous(dqHead, {0, 2, 1, 3}, executorPtr);
         const aclTensor *dkSequence = TransposeContiguous(dkHead, {0, 2, 1, 3}, executorPtr);
         const aclTensor *dvSequence = TransposeContiguous(dvHead, {0, 2, 1, 3}, executorPtr);
-        const aclTensor *dBetaSequence = TransposeContiguous(dBetaHead, {0, 2, 1}, executorPtr);
-        const aclTensor *dGSequence = TransposeContiguous(dGHead, {0, 2, 1}, executorPtr);
         CHECK_RET(ViewCopy(dqSequence, params.dqOut, executorPtr) == ACLNN_SUCCESS,
                   ACLNN_ERR_INNER_NULLPTR);
         CHECK_RET(ViewCopy(dkSequence, params.dkOut, executorPtr) == ACLNN_SUCCESS,
                   ACLNN_ERR_INNER_NULLPTR);
         CHECK_RET(ViewCopy(dvSequence, params.dvOut, executorPtr) == ACLNN_SUCCESS,
                   ACLNN_ERR_INNER_NULLPTR);
-        CHECK_RET(ViewCopy(dBetaSequence, params.dBetaOut, executorPtr) == ACLNN_SUCCESS,
-                  ACLNN_ERR_INNER_NULLPTR);
-        CHECK_RET(ViewCopy(dGSequence, params.dGOut, executorPtr) == ACLNN_SUCCESS,
-                  ACLNN_ERR_INNER_NULLPTR);
     }
+    const aclTensor *dBetaSequence = TransposeContiguous(dBetaHead, {0, 2, 1}, executorPtr);
+    const aclTensor *dGSequence = TransposeContiguous(dGHead, {0, 2, 1}, executorPtr);
+    CHECK_RET(ViewCopy(dBetaSequence, params.dBetaOut, executorPtr) == ACLNN_SUCCESS,
+              ACLNN_ERR_INNER_NULLPTR);
+    CHECK_RET(ViewCopy(dGSequence, params.dGOut, executorPtr) == ACLNN_SUCCESS,
+              ACLNN_ERR_INNER_NULLPTR);
     *workspaceSize = uniqueExecutor->GetWorkspaceSize();
     uniqueExecutor.ReleaseTo(executor);
     return ACLNN_SUCCESS;

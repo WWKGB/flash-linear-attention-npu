@@ -243,6 +243,8 @@ public:
         }
 
         const int64_t inputElems = vecRow_ * (K_ > V_ ? K_ : V_);
+        const int64_t outputRows = vecRow_ > 16 ? vecRow_ : 16;
+        const int64_t outputElems = outputRows * (K_ > V_ ? K_ : V_);
         if constexpr (std::is_same<DT, bfloat16_t>::value) {
             pipe_->InitBuffer(matrixCvPing_, vecRow_ * V_ * static_cast<int64_t>(sizeof(DT)));
             pipe_->InitBuffer(matrixCvPong_, vecRow_ * V_ * static_cast<int64_t>(sizeof(DT)));
@@ -251,8 +253,8 @@ public:
         pipe_->InitBuffer(qInputPong_, inputElems * static_cast<int64_t>(sizeof(DT)));
         pipe_->InitBuffer(gInputPing_, gateElems_ * static_cast<int64_t>(sizeof(GT)));
         pipe_->InitBuffer(gInputPong_, gateElems_ * static_cast<int64_t>(sizeof(GT)));
-        pipe_->InitBuffer(outputPing_, inputElems * static_cast<int64_t>(sizeof(DT)));
-        pipe_->InitBuffer(outputPong_, inputElems * static_cast<int64_t>(sizeof(DT)));
+        pipe_->InitBuffer(outputPing_, outputElems * static_cast<int64_t>(sizeof(DT)));
+        pipe_->InitBuffer(outputPong_, outputElems * static_cast<int64_t>(sizeof(DT)));
         pipe_->InitBuffer(statePing_, vecRow_ * V_ * static_cast<int64_t>(sizeof(float)));
         pipe_->InitBuffer(statePong_, vecRow_ * V_ * static_cast<int64_t>(sizeof(float)));
         pipe_->InitBuffer(qFp32Buf_, inputElems * static_cast<int64_t>(sizeof(float)));
@@ -779,8 +781,8 @@ private:
         curOutputPingPong_ ^= 1U;
     }
 
-    __aicore__ inline void TransposeDh0Tile(AscendC::LocalTensor<DT> dstTensor,
-                                            AscendC::LocalTensor<DT> srcTensor) const
+    __aicore__ inline void TransposeStateTile(AscendC::LocalTensor<DT> dstTensor,
+                                              AscendC::LocalTensor<DT> srcTensor) const
     {
         constexpr uint32_t TRANSPOSE_ROWS = 16;
         constexpr uint32_t DATA_BLOCK_BYTES = 32;
@@ -801,7 +803,10 @@ private:
         AscendC::TransDataTo5HD<uint16_t>(dstList, srcList, transposeParams);
     }
 
-    __aicore__ inline void CopyOutDh0VFirst(int64_t stateBase, int64_t dh0Base)
+    __aicore__ inline void CopyOutFp32RowsVFirst(AscendC::GlobalTensor<DT> &outTensor,
+                                                  AscendC::LocalTensor<float> srcTensor,
+                                                  int64_t outBase, int64_t rowOffset,
+                                                  int64_t rowCount)
     {
         constexpr int64_t TRANSPOSE_ROWS = 16;
         constexpr uint32_t SRC_OUTPUT_IDX = 0;
@@ -809,27 +814,40 @@ private:
         AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(mte3ToVEvent_[SRC_OUTPUT_IDX]);
         AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(mte3ToVEvent_[DST_OUTPUT_IDX]);
         AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(mte3ToVEvent_[SRC_OUTPUT_IDX]);
-        for (int64_t rowOffset = 0; rowOffset < K_; rowOffset += TRANSPOSE_ROWS) {
-            const uint32_t elems = static_cast<uint32_t>(TRANSPOSE_ROWS * V_);
+        for (int64_t tileRow = 0; tileRow < rowCount; tileRow += TRANSPOSE_ROWS) {
+            const int64_t curRows = Min(TRANSPOSE_ROWS, rowCount - tileRow);
+            const uint32_t elems = static_cast<uint32_t>(curRows * V_);
+            AscendC::Cast(outputBuf_[SRC_OUTPUT_IDX], srcTensor[tileRow * V_],
+                          AscendC::RoundMode::CAST_RINT, elems);
+            AscendC::PipeBarrier<PIPE_V>();
+            TransposeStateTile(outputBuf_[DST_OUTPUT_IDX], outputBuf_[SRC_OUTPUT_IDX]);
+            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(vToMte3Event_[DST_OUTPUT_IDX]);
+            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(vToMte3Event_[DST_OUTPUT_IDX]);
+            const AscendC::DataCopyExtParams copyParams{
+                static_cast<uint16_t>(V_), static_cast<uint32_t>(curRows * sizeof(DT)),
+                static_cast<uint32_t>((TRANSPOSE_ROWS - curRows) * sizeof(DT)),
+                static_cast<uint32_t>((K_ - curRows) * sizeof(DT)), 0};
+            AscendC::DataCopyPad(outTensor[outBase + rowOffset + tileRow],
+                                 outputBuf_[DST_OUTPUT_IDX], copyParams);
+            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(mte3ToVEvent_[DST_OUTPUT_IDX]);
+            if (tileRow + TRANSPOSE_ROWS < rowCount) {
+                AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(mte3ToVEvent_[DST_OUTPUT_IDX]);
+            }
+        }
+    }
+
+    __aicore__ inline void CopyOutDh0VFirst(int64_t stateBase, int64_t dh0Base)
+    {
+        for (int64_t rowOffset = 0; rowOffset < K_; rowOffset += vecRow_) {
+            const int64_t curRows = Min(vecRow_, K_ - rowOffset);
+            const uint32_t elems = static_cast<uint32_t>(curRows * V_);
             const uint32_t stateIdx = CopyInStateRows(
                 stateBuf_[curStatePingPong_], stateBase + rowOffset * V_, elems);
             AscendC::LocalTensor<float> stateFp32 = stateBuf_[stateIdx];
             AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(stateMte2ToVEvent_[stateIdx]);
-            AscendC::Cast(outputBuf_[SRC_OUTPUT_IDX], stateFp32, AscendC::RoundMode::CAST_RINT, elems);
-            AscendC::PipeBarrier<PIPE_V>();
-            TransposeDh0Tile(outputBuf_[DST_OUTPUT_IDX], outputBuf_[SRC_OUTPUT_IDX]);
-            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(vToMte3Event_[DST_OUTPUT_IDX]);
-            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(vToMte3Event_[DST_OUTPUT_IDX]);
-            const AscendC::DataCopyExtParams copyParams{
-                static_cast<uint16_t>(V_), static_cast<uint32_t>(TRANSPOSE_ROWS * sizeof(DT)), 0,
-                static_cast<uint32_t>((K_ - TRANSPOSE_ROWS) * sizeof(DT)), 0};
-            AscendC::DataCopyPad(dh0Gm_[dh0Base + rowOffset], outputBuf_[DST_OUTPUT_IDX], copyParams);
-            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(mte3ToVEvent_[DST_OUTPUT_IDX]);
+            CopyOutFp32RowsVFirst(dh0Gm_, stateFp32, dh0Base, rowOffset, curRows);
             AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(stateVToMte2Event_[stateIdx]);
             AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(stateMte3ToMte2Event_[stateIdx]);
-            if (rowOffset + TRANSPOSE_ROWS < K_) {
-                AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(mte3ToVEvent_[DST_OUTPUT_IDX]);
-            }
         }
     }
 

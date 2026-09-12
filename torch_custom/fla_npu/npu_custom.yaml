@@ -23,7 +23,7 @@ custom:
     op_api: all_version
   - func: npu_prepare_wy_repr_bwd_full(Tensor k, Tensor v, Tensor beta, Tensor A, Tensor dA, Tensor dw, Tensor du, Tensor g, int chunk_size, *, int[]? cu_seqlens=None, int[]? chunk_indices=None) -> (Tensor dk, Tensor dv, Tensor dbeta, Tensor dg)
     op_api: all_version
-  - func: npu_chunk_gated_delta_rule_bwd_dhu(Tensor q, Tensor k, Tensor w, Tensor d_o, Tensor dv, float scale, int chunk_size, *, Tensor? g=None, Tensor? gK=None, Tensor? h0=None, Tensor? dht=None, int[]? cu_seqlens=None, int[]? chunk_indices=None, bool? use_exp2=False, bool? state_v_first=False) -> (Tensor, Tensor, Tensor)
+  - func: npu_chunk_gated_delta_rule_bwd_dhu(Tensor q, Tensor k, Tensor w, Tensor d_o, Tensor dv, float scale, int chunk_size, *, Tensor? g=None, Tensor? gK=None, Tensor? h0=None, Tensor? dht=None, int[]? cu_seqlens=None, int[]? chunk_indices=None, bool? use_exp2=False, bool? transpose_state_layout=False) -> (Tensor, Tensor, Tensor)
     op_api: all_version
   - func: npu_chunk_gated_delta_rule_bwd(Tensor q, Tensor k, Tensor v, Tensor g, Tensor beta, Tensor A, Tensor d_o, float scale, int chunk_size, *, str layout="BSND", Tensor? initial_state=None, Tensor? dht=None, Tensor? q_rstd=None, Tensor? k_rstd=None, Tensor? beta_raw=None, Tensor? a_log=None, Tensor? dt_bias=None, bool? use_exp2=True, bool? use_gate_in_kernel=False, bool? use_qk_l2norm_in_kernel=False, bool? use_beta_sigmoid_in_kernel=False, bool? state_v_first=False, int[]? cu_seqlens=None, int[]? chunk_indices=None, bool? return_intermediate_states=False) -> (Tensor dq, Tensor dk, Tensor dv, Tensor d_beta, Tensor d_g, Tensor? dh0, Tensor? d_a_log, Tensor? d_dt_bias)
     op_api: all_version

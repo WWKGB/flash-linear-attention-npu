@@ -242,9 +242,14 @@ def run_cpu(spec: dict[str, Any]):
     state_v_first = _as_bool(spec.get("state_v_first", False))
     if dh0 is not None and state_v_first:
         dh0 = dh0.transpose(-1, -2).contiguous()
+    dq, dk, dv, d_beta, d_g = outputs
     if str(spec.get("layout", "BNSD")) in {"BSND", "TND"}:
-        outputs = tuple(tensor.transpose(1, 2).contiguous() for tensor in outputs)
-    return (*outputs, dh0, None, None)
+        dq, dk, dv = (
+            tensor.transpose(1, 2).contiguous() for tensor in (dq, dk, dv)
+        )
+    d_beta = d_beta.transpose(1, 2).contiguous()
+    d_g = d_g.transpose(1, 2).contiguous()
+    return dq, dk, dv, d_beta, d_g, dh0, None, None
 
 
 def _public_layout(tensor, sequence_major: bool):

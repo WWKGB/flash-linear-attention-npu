@@ -63,8 +63,8 @@ reference，避免 DUT 与标杆复用同一 kernel。
 | `dq` | 必选 | 与 q 同 shape/dtype | Query 梯度 |
 | `dk` | 必选 | 与 k 同 shape/dtype | Key 梯度 |
 | `dv` | 必选 | 与 v 同 shape/dtype | Value 梯度 |
-| `dBeta` | 必选 | 与 beta 同 shape/dtype | Delta 系数梯度 |
-| `dG` | 必选 | 与 g 同 shape/dtype | 门控值梯度 |
+| `dBeta` | 必选 | `[B,T,Hv]`；与 beta 同 dtype | Delta 系数梯度，固定为 BSND |
+| `dG` | 必选 | `[B,T,Hv]`；与 g 同 dtype | 门控值梯度，固定为 BSND |
 | `dh0` | 可选 | 与 `initialStateOptional` 同 shape/dtype | 初始状态梯度；未提供 initial state 时为空 |
 | `dALog` | 预留 | 当前为空 | 当前不计算，ACLNN 输出描述符必须为 `nullptr` |
 | `dDtBias` | 预留 | 当前为空 | 当前不计算，ACLNN 输出描述符必须为 `nullptr` |

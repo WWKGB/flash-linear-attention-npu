@@ -74,6 +74,7 @@ def chunk_gated_delta_rule_bwd_dhu_cpu(
     chunk_size: int = 64,
     golden_mode: str = "fp32",
     use_exp2: bool = False,
+    state_v_first: bool = False,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
     """GVA 形状 CPU 标杆。golden_mode: fp64 / npu / fp32。"""
     del dht
@@ -290,4 +291,6 @@ def chunk_gated_delta_rule_bwd_dhu_cpu(
         if dh0 is not None:
             dh0.copy_(b_dh_buffers[0].transpose(0, 1))
 
+    if state_v_first:
+        dh0 = dh0.transpose(-1, -2).contiguous() if dh0 is not None else None
     return dh, dh0, dv2
